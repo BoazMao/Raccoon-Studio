@@ -81,6 +81,7 @@ export async function translateProject(
       (100 * i) / batches.length,
       `Translating batch ${i + 1} / ${batches.length}`,
     );
+    let meaningError: ProviderError | undefined;
     try {
       const draft = await requestJson(
         config,
@@ -129,7 +130,8 @@ export async function translateProject(
           }));
         } catch (error) {
           signal.throwIfAborted();
-          if (error instanceof ProviderError && error.fatal) throw error;
+          if (error instanceof ProviderError && error.fatal)
+            meaningError = error;
           results = results.map((r) => ({
             ...r,
             issues: [
@@ -159,6 +161,8 @@ export async function translateProject(
     }
     signal.throwIfAborted();
     emitBatch(results);
+    // Preserve the completed draft before stopping on a provider configuration error.
+    if (meaningError) throw meaningError;
     update(
       (100 * (i + 1)) / batches.length,
       `${i + 1} / ${batches.length} batches · ${failures} captions failed`,

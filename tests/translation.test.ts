@@ -4,11 +4,18 @@ import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { blank, type Caption, type Project } from "../src/shared/model";
+import {
+  blank,
+  split,
+  merge,
+  type Caption,
+  type Project,
+} from "../src/shared/model";
 import {
   approveGuidance,
   emptyGuidance,
   guidanceKey,
+  changeLanguages,
 } from "../src/shared/context";
 import {
   translationBatches,
@@ -74,6 +81,122 @@ async function provider<T>(
 }
 const response = (value: unknown) => ({
   body: { choices: [{ message: { content: JSON.stringify(value) } }] },
+});
+
+test("fatal meaning errors preserve completed drafts and stop before the next batch", async () => {
+  for (const status of [400, 401]) {
+    const p = {
+      ...project(),
+      captions: Array.from({ length: 12 }, (_, i) =>
+        caption(String(i), "A sentence."),
+      ),
+    };
+    await provider(
+      (body) => {
+        const input = JSON.parse(body.messages[1].content);
+        return input.proposedTranslations
+          ? { status }
+          : response({
+              translations: input.captionsToTranslate.map((c: Caption) => ({
+                id: c.id,
+                text: "Initial draft",
+              })),
+            });
+      },
+      async (settings, requests) => {
+        const events: Event[] = [];
+        await assert.rejects(
+          translateProject(
+            p,
+            "request",
+            options,
+            settings,
+            new AbortController().signal,
+            () => {},
+            (e) => events.push(e),
+          ),
+          new RegExp(String(status)),
+        );
+        assert.equal(requests.length, 2);
+        assert.equal(events.length, 1);
+        const result = applyTranslationBatch(
+          p,
+          events[0] as TranslationBatchEvent,
+        );
+        assert.equal(result.applied, 10);
+        for (const c of result.project.captions.slice(0, 10)) {
+          assert.equal(c.target, "Initial draft");
+          assert.equal(c.status, "draft");
+          assert.equal(c.error, undefined);
+          assert.match(
+            c.translation!.issues[0].message,
+            /Meaning check failed/,
+          );
+        }
+        assert.ok(
+          result.project.captions.slice(10).every((c) => c.status === "empty"),
+        );
+      },
+    );
+  }
+});
+
+test("language changes clear pair-specific terms while preserving general guidance", () => {
+  const p = approveGuidance(project(), {
+    ...emptyGuidance(),
+    description: "Tutorial",
+    tone: "Technical",
+    terms: [{ source: "model", target: "模型", note: "", captionIds: [] }],
+  });
+  p.captions[0] = { ...p.captions[0], target: "译文", status: "reviewed" };
+  assert.equal(changeLanguages(p, p.language, p.targetLanguage), p);
+  for (const changed of [
+    changeLanguages(p, "zh", p.targetLanguage),
+    changeLanguages(p, p.language, "English"),
+  ]) {
+    assert.deepEqual(changed.translationContext!.approved.terms, []);
+    assert.equal(changed.translationContext!.approved.description, "Tutorial");
+    assert.equal(changed.translationContext!.approved.tone, "Technical");
+    assert.equal(changed.captions[0].status, "stale");
+    assert.equal(changed.captions[1].status, "empty");
+    assert.equal(p.translationContext!.approved.terms.length, 1);
+  }
+});
+
+test("splits and merges discard obsolete translation findings without mutating the original", () => {
+  const c: Caption = {
+    ...caption("0", "Hello world"),
+    target: "你好世界",
+    status: "draft",
+    error: "Old failure",
+    translation: {
+      origin: "ai",
+      issues: [{ kind: "meaning", message: "Old concern" }],
+    },
+  };
+  const aligned: Caption = {
+    ...c,
+    alignment: {
+      method: "whisperx",
+      needsReview: false,
+      tokens: [
+        { text: "Hello", start: 0, end: 1, confidence: 1 },
+        { text: " world", start: 2, end: 3, confidence: 1 },
+      ],
+    },
+  };
+  for (const original of [c, aligned]) {
+    for (const part of split(original, 1.5, "new")) {
+      assert.equal(part.target, "");
+      assert.equal(part.translation, undefined);
+      assert.equal(part.error, undefined);
+    }
+  }
+  const combined = merge(c, { ...c, id: "next", start: 3, end: 6 });
+  assert.equal(combined.translation, undefined);
+  assert.equal(combined.error, undefined);
+  assert.equal(combined.status, "stale");
+  assert.equal(c.translation!.issues.length, 1);
 });
 
 test("translation batches preserve drafts/reviewed rows and include neighboring context", () => {

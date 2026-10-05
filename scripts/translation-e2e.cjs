@@ -331,6 +331,59 @@ const root = path.resolve(__dirname, "..");
     console.log(
       "PASS: glossary file export/import, explicit duplicate policy, global persistence and reuse in another project (actual IPC/filesystem, automated dialogs)",
     );
+    // Unsaved glossary terms must reset even when the approved guidance key is unchanged.
+    await page
+      .getByRole("button", { name: "Close translation context" })
+      .click();
+    await page.getByLabel("Source language").selectOption("zh");
+    await page
+      .getByRole("button", { name: "Translation context", exact: true })
+      .click();
+    assert.equal(
+      await page.getByLabel("Glossary source 1", { exact: true }).count(),
+      0,
+    );
+    await page
+      .getByRole("button", { name: "Close translation context" })
+      .click();
+    await page.getByLabel("Source language").selectOption("en");
+    await page
+      .getByRole("button", { name: "Translation context", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Load global", exact: true })
+      .click();
+    await page.getByText(/1 added/).waitFor();
+    await page
+      .getByLabel("Video description", { exact: true })
+      .fill("Keep general description");
+    await page
+      .getByRole("button", { name: "Save guidance", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Close translation context" })
+      .click();
+    await page.getByLabel("Target language").selectOption("English");
+    await page
+      .getByRole("button", { name: "Translation context", exact: true })
+      .click();
+    assert.equal(
+      await page.getByLabel("Glossary source 1", { exact: true }).count(),
+      0,
+    );
+    assert.equal(
+      await page.getByLabel("Video description", { exact: true }).inputValue(),
+      "Keep general description",
+    );
+    assert.equal(
+      await page
+        .getByRole("button", { name: "Save to global", exact: true })
+        .isDisabled(),
+      true,
+    );
+    console.log(
+      "PASS: language selectors clear approved and unsaved pair-specific glossary terms while preserving general guidance",
+    );
     console.log(
       "PASS: actual Electron manual guidance, no analysis requests, batched draft/meaning requests, manual/reviewed protection, review flags and save/reopen (controlled local provider)",
     );

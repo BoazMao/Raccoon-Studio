@@ -77,3 +77,8 @@ Type checking, build, and all 45 unit tests passed. The added tests cover resolu
 ## Removal of AI context analysis — 1 October 2026
 
 Removed the analysis UI, IPC request/event, and background implementation. Manual guidance, glossary operations, contextual translation, and meaning checks remain. Legacy saved analysis data remains readable for project compatibility but is not displayed or sent for analysis. Type checking, build, and all 44 remaining unit tests passed (the removed analysis feature's test was removed). The refreshed unpackaged app passed the actual Electron translation/glossary workflow using controlled HTTP responses, including verification that entering guidance makes no API requests. The UI test now saves a glossary removal before verifying restoration from global terms; identical guidance correctly disables Save guidance. The updated panel screenshot was inspected. Nothing was published.
+
+## PR 10 review fixes — 5 October 2026
+
+All 47 unit tests, type checking, build, and the development and refreshed unpackaged Electron translation workflows passed. New regressions verify that HTTP 400/401 meaning-check failures retain completed drafts with warning metadata and stop before the next batch; source or target language changes clear pair-specific terms while preserving description/style; and both aligned and unaligned splits plus merges clear obsolete translation findings. The actual Electron test also changes language with unsaved glossary terms and verifies they cannot be saved globally under the new pair. Translation HTTP responses are controlled local fixtures, not live-model quality evaluations. No release was published.
+

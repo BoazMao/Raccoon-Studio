@@ -16,6 +16,7 @@ import "./style.css";
 import { overlappingCaptions, pasteCaptions } from "../shared/editing";
 import { applyRealignment, applyTranscription } from "../shared/whisperx";
 import { waveformMatchesMedia } from "../shared/waveform";
+import { changeLanguages } from "../shared/context";
 import { ContextPanel } from "./ContextPanel";
 import type { DownloadQuality, VideoPreview } from "../shared/download";
 import {
@@ -1353,14 +1354,7 @@ function App() {
                 value={p.language}
                 disabled={busy}
                 onChange={(e) =>
-                  commit({
-                    ...p,
-                    language: e.target.value,
-                    captions: p.captions.map((c) => ({
-                      ...c,
-                      status: c.target ? "stale" : "empty",
-                    })),
-                  })
+                  commit(changeLanguages(p, e.target.value, p.targetLanguage))
                 }
               >
                 <option value="en">English</option>
@@ -1374,14 +1368,7 @@ function App() {
                 value={p.targetLanguage}
                 disabled={busy}
                 onChange={(e) =>
-                  commit({
-                    ...p,
-                    targetLanguage: e.target.value,
-                    captions: p.captions.map((c) => ({
-                      ...c,
-                      status: c.target ? "stale" : "empty",
-                    })),
-                  })
+                  commit(changeLanguages(p, p.language, e.target.value))
                 }
               >
                 <option value="English">English</option>
@@ -1500,9 +1487,11 @@ function App() {
                     />
                     {c.error && <small className="failure">{c.error}</small>}
                     {[
-                      ...(c.translation?.issues.filter(
-                        (issue) => issue.kind !== "readability",
-                      ) || []),
+                      ...(c.target.trim()
+                        ? c.translation?.issues.filter(
+                            (issue) => issue.kind !== "readability",
+                          ) || []
+                        : []),
                       ...(c.target
                         ? readabilityIssues(
                             c.target,

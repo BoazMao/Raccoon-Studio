@@ -44,7 +44,7 @@ export function ContextPanel({
   live.current = { id: project.id, draft, scope };
   useEffect(() => {
     setGlossaryMessage("");
-  }, [project.id]);
+  }, [project.id, project.language, project.targetLanguage]);
   async function glossaryAction(action: () => Promise<void>) {
     setGlossaryBusy(true);
     setGlossaryMessage("");
@@ -86,7 +86,7 @@ export function ContextPanel({
   }
   useEffect(
     () => setDraft(project.translationContext?.approved || emptyGuidance()),
-    [project.id, key],
+    [project.id, project.language, project.targetLanguage, key],
   );
   const dirty = JSON.stringify(draft) !== JSON.stringify(approved);
   useEffect(() => {

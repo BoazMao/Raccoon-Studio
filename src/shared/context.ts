@@ -89,3 +89,23 @@ export function approveGuidance(p: Project, input: Guidance): Project {
     ),
   };
 }
+
+export function changeLanguages(
+  p: Project,
+  language: string,
+  targetLanguage: string,
+): Project {
+  if (p.language === language && p.targetLanguage === targetLanguage) return p;
+  return {
+    ...p,
+    language,
+    targetLanguage,
+    translationContext: p.translationContext
+      ? { approved: { ...p.translationContext.approved, terms: [] } }
+      : undefined,
+    captions: p.captions.map((c) => ({
+      ...c,
+      status: c.target ? "stale" : "empty",
+    })),
+  };
+}
