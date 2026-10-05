@@ -1,5 +1,8 @@
 import type { Project, Caption, SpeechRun } from "./model";
 import type { SavedWaveform } from "./waveform";
+import type { TranslationOptions, TranslationBatchEvent } from "./translation";
+import type { DownloadQuality, VideoPreview } from "./download";
+import type { GlossaryFile, GlossaryScope } from "./glossary";
 export type Settings = {
   ffmpeg: string;
   ffprobe: string;
@@ -25,6 +28,7 @@ export type Job = {
   cancellable?: boolean;
 };
 export type Event =
+  | TranslationBatchEvent
   | { type: "speechInstalled"; python: string }
   | { type: "closing" }
   | { type: "job"; job: Job }
@@ -61,6 +65,7 @@ export type Event =
       original: string;
       originalTarget: string;
       targetLanguage: string;
+      guidanceKey?: string;
       text: string;
       error?: string;
     };
@@ -70,6 +75,10 @@ export type Requests = {
   closed: { input: void; output: void };
   settings: { input: void; output: Settings };
   configure: { input: Settings; output: void };
+  glossaryImport: { input: void; output: GlossaryFile | null };
+  glossaryExport: { input: GlossaryFile; output: string | null };
+  glossaryLoadGlobal: { input: GlossaryScope; output: GlossaryFile | null };
+  glossarySaveGlobal: { input: GlossaryFile; output: number };
   pick: { input: "media" | "model" | "exe"; output: string | null };
   open: { input: void; output: { project: Project; path: string } | null };
   save: {
@@ -91,9 +100,12 @@ export type Requests = {
   };
   preview: {
     input: string;
-    output: { title: string; duration: number; uploader: string };
+    output: VideoPreview;
   };
-  download: { input: { url: string; projectId: string }; output: string };
+  download: {
+    input: { url: string; projectId: string; quality?: DownloadQuality };
+    output: string;
+  };
   transcribe: {
     input: Project | { project: Project; mode: "replace" | "add" };
     output: string;
@@ -101,7 +113,10 @@ export type Requests = {
   realign: { input: { project: Project; ids: string[] }; output: string };
   checkSpeech: { input: void; output: string };
   installSpeech: { input: void; output: string };
-  translate: { input: Project; output: string };
+  translate: {
+    input: { project: Project; requestId: string; options: TranslationOptions };
+    output: string;
+  };
   cancel: { input: string; output: void };
   export: {
     input: { project: Project; track: "source" | "target" };

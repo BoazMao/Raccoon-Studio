@@ -16,6 +16,14 @@ import "./style.css";
 import { overlappingCaptions, pasteCaptions } from "../shared/editing";
 import { applyRealignment, applyTranscription } from "../shared/whisperx";
 import { waveformMatchesMedia } from "../shared/waveform";
+import { changeLanguages } from "../shared/context";
+import { ContextPanel } from "./ContextPanel";
+import type { DownloadQuality, VideoPreview } from "../shared/download";
+import {
+  applyTranslationBatch,
+  readabilityIssues,
+  type TranslationOptions,
+} from "../shared/translation";
 declare global {
   interface Window {
     studio: Bridge;
@@ -45,14 +53,17 @@ function App() {
     [jobs, setJobs] = useState<Job[]>([]),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("Ready when you are"),
-    [panel, setPanel] = useState<"none" | "download" | "settings">("none"),
+    [panel, setPanel] = useState<"none" | "download" | "settings" | "context">(
+      "none",
+    ),
+    [translationMode, setTranslationMode] =
+      useState<TranslationOptions["mode"]>("needed"),
+    [checkMeaning, setCheckMeaning] = useState(true),
     [settings, setSettings] = useState<Settings>(),
     [videoUrl, setVideoUrl] = useState(""),
-    [metadata, setMetadata] = useState<{
-      title: string;
-      duration: number;
-      uploader: string;
-    }>(),
+    [metadata, setMetadata] = useState<VideoPreview>(),
+    [downloadQuality, setDownloadQuality] = useState<DownloadQuality>("best"),
+    [previewing, setPreviewing] = useState(false),
     [zoom, setZoom] = useState(1),
     [filter, setFilter] = useState("all"),
     [transcribeMode, setTranscribeMode] = useState<"replace" | "add">(
@@ -69,6 +80,8 @@ function App() {
     canvas = useRef<HTMLCanvasElement>(null),
     timelineScroll = useRef<HTMLDivElement>(null),
     latestWave = useRef(""),
+    latestTranslation = useRef(""),
+    previewRevision = useRef(0),
     pendingRecovery = useRef<Project | null>(null),
     drag = useRef<{
       id: string;
@@ -316,6 +329,7 @@ function App() {
     if (video.current) video.current.currentTime = 0;
     switching.current = true;
     latestWave.current = "";
+    latestTranslation.current = "";
     current.current = next;
     setP(next);
     setFile(path);
@@ -395,6 +409,15 @@ function App() {
         return;
       }
       if (e.projectId !== current.current.id) return;
+      if (e.type === "translationBatch") {
+        if (e.requestId !== latestTranslation.current) return;
+        const result = applyTranslationBatch(current.current, e);
+        if (result.applied) commit(result.project);
+        setNotice(
+          `${result.applied} translation drafts applied${result.skipped ? ` · ${result.skipped} skipped because captions or guidance changed` : ""}`,
+        );
+        return;
+      }
       if (e.type === "wave") {
         if (
           e.requestId !== latestWave.current ||
@@ -778,6 +801,21 @@ function App() {
           Open project
         </button>
       </nav>
+      <ContextPanel
+        project={p}
+        visible={panel === "context"}
+        onChange={(next) => commit(next)}
+        onError={fail}
+        onClose={() => setPanel("none")}
+        onCaption={(id) => {
+          select(id);
+          const caption = current.current.captions.find((c) => c.id === id);
+          if (caption) {
+            setTime(caption.start);
+            if (video.current) video.current.currentTime = caption.start;
+          }
+        }}
+      />
       {recovery && (
         <div className="banner">
           A previous autosave is available.
@@ -825,13 +863,29 @@ function App() {
             onChange={(e) => {
               setUrl(e.target.value);
               setMetadata(undefined);
+              previewRevision.current++;
+              setPreviewing(false);
+              setDownloadQuality("best");
             }}
           />
           <button
+            disabled={previewing || !url.trim()}
             onClick={() =>
-              void attempt(async () =>
-                setMetadata(await api.call("preview", url)),
-              )
+              void attempt(async () => {
+                const revision = ++previewRevision.current;
+                setPreviewing(true);
+                setMetadata(undefined);
+                try {
+                  const result = await api.call("preview", url);
+                  if (revision === previewRevision.current) {
+                    setMetadata(result);
+                    setDownloadQuality("best");
+                  }
+                } finally {
+                  if (revision === previewRevision.current)
+                    setPreviewing(false);
+                }
+              })
             }
           >
             Preview
@@ -844,6 +898,33 @@ function App() {
                   {metadata.uploader} · {stamp(metadata.duration)}
                 </small>
               </div>
+              <label className="download-quality">
+                Video quality
+                <select
+                  aria-label="Video quality"
+                  value={downloadQuality}
+                  onChange={(e) =>
+                    setDownloadQuality(
+                      e.target.value === "best"
+                        ? "best"
+                        : Number(e.target.value),
+                    )
+                  }
+                  disabled={busy}
+                >
+                  <option value="best">Best available</option>
+                  {metadata.qualities.map((height) => (
+                    <option key={height} value={height}>
+                      {height}p or lower
+                    </option>
+                  ))}
+                </select>
+                <small>
+                  {metadata.qualities.length
+                    ? "Includes audio when available"
+                    : "The site did not report resolution choices"}
+                </small>
+              </label>
               <button
                 className="primary"
                 disabled={busy}
@@ -860,6 +941,7 @@ function App() {
                     const job = await api.call("download", {
                       url,
                       projectId: next.id,
+                      quality: downloadQuality,
                     });
                     if (!job) await load(previous, previousFile);
                     setPanel("none");
@@ -1070,7 +1152,11 @@ function App() {
                   }
                   onClick={toggle}
                 />
-                <div className="subtitle">{currentCaption?.source}</div>
+                <div className="subtitle">
+                  {currentCaption?.target.trim()
+                    ? currentCaption.target
+                    : currentCaption?.source}
+                </div>
               </>
             ) : (
               <div className="empty-video">
@@ -1205,13 +1291,59 @@ function App() {
                 disabled={!p.captions.length || busy}
                 onClick={() =>
                   void attempt(async () => {
-                    await api.call("translate", p);
+                    const requestId = crypto.randomUUID();
+                    latestTranslation.current = requestId;
+                    await api.call("translate", {
+                      project: p,
+                      requestId,
+                      options: {
+                        mode: translationMode,
+                        ids: selection,
+                        checkMeaning,
+                      },
+                    });
                   })
                 }
               >
                 Translate →
               </button>
             </div>
+          </div>
+          <div className="translation-tools">
+            <button
+              onClick={() => setPanel(panel === "context" ? "none" : "context")}
+            >
+              Translation context
+            </button>
+            <label>
+              Translate{" "}
+              <select
+                aria-label="Translation scope"
+                value={translationMode}
+                disabled={busy}
+                onChange={(e) =>
+                  setTranslationMode(
+                    e.target.value as TranslationOptions["mode"],
+                  )
+                }
+              >
+                <option value="needed">Empty, stale and failed</option>
+                <option value="selected">
+                  Selected captions (replace drafts)
+                </option>
+                <option value="replace">All unreviewed (replace drafts)</option>
+              </select>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={checkMeaning}
+                disabled={busy}
+                onChange={(e) => setCheckMeaning(e.target.checked)}
+              />{" "}
+              Check meaning
+            </label>
+            <small>Reviewed captions are preserved</small>
           </div>
           <div className="track-head">
             <span>TIME</span>
@@ -1221,7 +1353,9 @@ function App() {
                 aria-label="Source language"
                 value={p.language}
                 disabled={busy}
-                onChange={(e) => commit({ ...p, language: e.target.value })}
+                onChange={(e) =>
+                  commit(changeLanguages(p, e.target.value, p.targetLanguage))
+                }
               >
                 <option value="en">English</option>
                 <option value="zh">Chinese</option>
@@ -1234,14 +1368,7 @@ function App() {
                 value={p.targetLanguage}
                 disabled={busy}
                 onChange={(e) =>
-                  commit({
-                    ...p,
-                    targetLanguage: e.target.value,
-                    captions: p.captions.map((c) => ({
-                      ...c,
-                      status: c.target ? "stale" : "empty",
-                    })),
-                  })
+                  commit(changeLanguages(p, p.language, e.target.value))
                 }
               >
                 <option value="English">English</option>
@@ -1354,10 +1481,32 @@ function App() {
                           target: e.target.value,
                           status: "draft",
                           error: undefined,
+                          translation: { origin: "manual", issues: [] },
                         }))
                       }
                     />
                     {c.error && <small className="failure">{c.error}</small>}
+                    {[
+                      ...(c.target.trim()
+                        ? c.translation?.issues.filter(
+                            (issue) => issue.kind !== "readability",
+                          ) || []
+                        : []),
+                      ...(c.target
+                        ? readabilityIssues(
+                            c.target,
+                            c.end - c.start,
+                            p.targetLanguage,
+                          )
+                        : []),
+                    ].map((issue, j) => (
+                      <small className="translation-issue" key={j}>
+                        {issue.kind === "meaning"
+                          ? "Check meaning"
+                          : "Readability"}
+                        : {issue.message}
+                      </small>
+                    ))}
                   </div>
                   <button
                     className={"review " + c.status}

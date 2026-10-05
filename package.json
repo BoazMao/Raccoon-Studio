@@ -20,6 +20,8 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:e2e": "node scripts/e2e.cjs",
+    "test:translation": "node scripts/translation-e2e.cjs",
+    "test:download": "node scripts/download-quality-e2e.cjs",
     "test:pipeline": "node scripts/pipeline.cjs",
     "test:install": "node scripts/install-smoke.cjs",
     "format": "prettier --write src scripts tests",

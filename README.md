@@ -53,6 +53,10 @@ CPU mode does not require CUDA. NVIDIA GPU mode requires a compatible driver, CU
 The release includes the optional **whisper.cpp legacy fallback** (`whisper-cli.exe` v1.7.6 and its CPU runtime DLLs). Choose it in Settings and select a compatible model; models are not bundled. This engine is independent of Python and WhisperX. You may also select a custom executable from the [whisper.cpp releases](https://github.com/ggml-org/whisper.cpp/releases).
 
 
+### Download quality
+
+After **Preview**, choose **Video quality**: Best available, or one of the reported resolutions as an upper limit (for example, 720p or lower). Audio is included when available. A capped choice will not fall back to a higher resolution. Different downloaded formats have distinct filenames so a previous higher-quality download is not reused by mistake. Sites that do not report resolutions offer Best available only.
+
 ### AI translation
 
 In **Settings**, enter:
@@ -63,7 +67,20 @@ In **Settings**, enter:
 
 The app calls `/chat/completions`. HTTPS is required for remote providers; local servers may use loopback HTTP, such as `http://127.0.0.1:1234/v1`.
 
+The local development build adds the complete translation pipeline:
+
+- Open **Translation context** to enter a video description, tone/style, and glossary manually. Choose Simplified/Traditional Chinese, then click **Save guidance**. Guidance is saved with the project and used in translation requests.
+- In the glossary, **Save to global** merges the displayed terms into the app's reusable glossary for this language pair and Chinese variant, updating matching terms. **Load global** copies them into the current project's draft guidance. **Save to file** exports a versioned JSON glossary; **Import file** loads one. Description, transcript, and project-specific caption references are excluded from portable/global glossaries. Loading keeps existing project terms by default; choose **Use imported terms** to replace duplicates. Review loaded terms and click **Save guidance** to use them for translation. The global library lives in `global-glossaries.json` in the app's user-data directory.
+- **Translate →** sends consecutive batches (up to 20 captions, with surrounding source captions and approved guidance). The app validates every returned ID before applying text. Timings stay under editor control.
+- **Check meaning**, enabled by default, makes a second API request to compare the draft against the source and context. Results remain drafts for human review; unresolved meaning concerns and line-length/reading-speed warnings appear in the caption list. Readability warnings are advisory (Chinese: 16 characters/line and 9 characters/second; English: 42 and 20; two lines maximum).
+- The default scope translates only empty, stale, and failed captions. Use **Selected captions (replace drafts)** or **All unreviewed (replace drafts)** deliberately to redo existing drafts. Reviewed captions are skipped. Editing the description/style invalidates existing translations; changing a glossary term marks matching source captions stale.
+- Requests time out after 90 seconds, retry transient failures with bounded backoff, and retry invalid JSON/ID mappings up to three total attempts. Authentication/configuration errors stop the job. Cancel preserves completed batches. Each applied batch is one undo step; results are rejected if the relevant source/context/guidance or your target text changed while the request ran.
+
+Official OpenAI requests use strict structured output for translation and meaning checks; compatible endpoints use JSON prompts with the same local validation. Use a model that supports the selected endpoint's Chat Completions API. Meaning checks add API calls. `npm run test:translation` exercises the editor against a controlled local HTTP provider; it does not measure live-model translation quality.
+
 Translation sends caption text to the configured endpoint. Transcription does not upload audio. API keys are excluded from project files and encrypted in Windows settings; if encryption is unavailable, the key is kept only in memory.
+
+Video preview shows the translated subtitle when it is nonempty, falling back to the source text otherwise.
 
 ## Basic workflow
 

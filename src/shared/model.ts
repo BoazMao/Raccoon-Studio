@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { WaveformSchema } from "./waveform";
+import { TranslationContextSchema } from "./context";
+import { TranslationMetaSchema } from "./translation";
 export const CaptionSchema = z
   .object({
     id: z.string().min(1),
@@ -9,6 +11,7 @@ export const CaptionSchema = z
     target: z.string(),
     status: z.enum(["empty", "draft", "reviewed", "stale", "failed"]),
     error: z.string().optional(),
+    translation: TranslationMetaSchema.optional(),
     alignment: z
       .object({
         method: z.enum(["whisper-dtw", "whisperx"]),
@@ -52,6 +55,7 @@ export const ProjectSchema = z
     targetLanguage: z.string(),
     speechRuns: z.array(SpeechRunSchema).optional(),
     waveform: WaveformSchema.optional().catch(undefined),
+    translationContext: TranslationContextSchema.optional(),
     captions: z.array(CaptionSchema),
   })
   .superRefine((p, ctx) => {
@@ -108,6 +112,7 @@ export function timing(
 export function split(c: Caption, at: number, id: string): Caption[] {
   if (at - c.start < 0.04 || c.end - at < 0.04)
     throw Error("Place the playhead inside the caption");
+  c = { ...c, translation: undefined, error: undefined };
   const aligned = c.alignment?.needsReview ? undefined : c.alignment?.tokens;
   if (aligned && aligned.length > 1) {
     const boundaries = aligned.slice(1).flatMap((token, i) =>
@@ -188,6 +193,8 @@ export function split(c: Caption, at: number, id: string): Caption[] {
 export function merge(a: Caption, b: Caption): Caption {
   return {
     ...a,
+    translation: undefined,
+    error: undefined,
     start: Math.min(a.start, b.start),
     end: Math.max(a.end, b.end),
     source: [a.source, b.source].filter(Boolean).join(" "),

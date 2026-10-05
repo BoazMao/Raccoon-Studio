@@ -61,7 +61,7 @@ const root = path.resolve(__dirname, ".."),
         if (slow) await new Promise((r) => setTimeout(r, 4000));
         if (failNext) {
           failNext = false;
-          res.writeHead(503);
+          res.writeHead(401);
           res.end("test failure");
           return;
         }
@@ -71,7 +71,18 @@ const root = path.resolve(__dirname, ".."),
             choices: [
               {
                 message: {
-                  content: "Traducción: " + parsed.messages[1].content,
+                  content: (() => {
+                    const input = JSON.parse(parsed.messages[1].content);
+                    const review = !!input.proposedTranslations;
+                    return JSON.stringify({
+                      [review ? "reviews" : "translations"]:
+                        input.captionsToTranslate.map((c) => ({
+                          id: c.id,
+                          text: "Traducción: " + c.source,
+                          ...(review ? { issues: [] } : {}),
+                        })),
+                    });
+                  })(),
                 },
               },
             ],

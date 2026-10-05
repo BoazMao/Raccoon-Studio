@@ -995,3 +995,115 @@ footer {
 .timeline-tools small {
   color: #99b7ba;
 }
+.translation-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #36414a;
+}
+.translation-tools label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.translation-tools input[type="checkbox"] {
+  width: auto;
+}
+.translation-issue {
+  display: block;
+  color: #e7bf79;
+  padding: 3px 0;
+}
+.context-panel {
+  position: fixed;
+  right: 16px;
+  top: 90px;
+  bottom: 105px;
+  z-index: 20;
+  width: min(640px, calc(100vw - 32px));
+  background: #182128;
+  border: 1px solid #536975;
+  border-radius: 10px;
+  box-shadow: 0 12px 48px #0009;
+  padding: 18px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.context-heading,
+.context-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.context-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-top: 1px solid #3a4852;
+  padding-top: 16px;
+}
+.context-panel p {
+  color: #b4c4cc;
+  line-height: 1.5;
+}
+.context-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.context-panel h4 {
+  margin: 0;
+}
+.context-term {
+  padding: 12px;
+  border: 1px solid #344650;
+  border-radius: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.context-term-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.context-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.context-evidence button {
+  text-align: left;
+  white-space: normal;
+  font-size: 12px;
+  color: #b3dacb;
+}
+.context-panel .context-warning {
+  color: #f0c37c;
+}
+.context-heading {
+  position: sticky;
+  top: -18px;
+  z-index: 1;
+  background: #182128;
+  padding: 12px 0;
+}
+#context-suggestions {
+  scroll-margin-top: 64px;
+}
+.glossary-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.download-quality {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
