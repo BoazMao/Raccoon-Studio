@@ -137,7 +137,17 @@ jobs:
           - Completed translation drafts are kept if a meaning check fails.
           - Fixed glossary terms carrying over between languages and outdated warnings after splitting or merging captions.
           '@ | Set-Content -LiteralPath .tools/release-notes.md -Encoding utf8
-          gh release create "v$env:RELEASE_VERSION" "release/$env:RELEASE_ASSET" release/SHA256SUMS.txt --repo "${{ github.repository }}" --target $env:RELEASE_COMMIT --title "Raccoon Studio $env:RELEASE_VERSION" --notes-file .tools/release-notes.md
+          $tag = "v$env:RELEASE_VERSION"
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh api --method PATCH "repos/${{ github.repository }}/git/refs/tags/$tag" -f "sha=$env:RELEASE_COMMIT" -F force=true
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            gh release upload $tag "release/$env:RELEASE_ASSET" release/SHA256SUMS.txt --clobber --repo "${{ github.repository }}"
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            gh release edit $tag --repo "${{ github.repository }}" --title "Raccoon Studio $env:RELEASE_VERSION" --notes-file .tools/release-notes.md
+          } else {
+            gh release create "v$env:RELEASE_VERSION" "release/$env:RELEASE_ASSET" release/SHA256SUMS.txt --repo "${{ github.repository }}" --target $env:RELEASE_COMMIT --title "Raccoon Studio $env:RELEASE_VERSION" --notes-file .tools/release-notes.md
+          }
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Preserve verification screenshots
         if: always()
