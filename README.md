@@ -1,6 +1,6 @@
 # Raccoon Studio
 
-A Windows desktop subtitle editor for importing videos, transcribing and aligning speech locally, editing captions against a waveform, translating, and exporting subtitles. Supports **English and Chinese**, including Simplified and Traditional Chinese translations.
+A Windows desktop subtitle editor for importing videos, transcribing and aligning speech locally, editing captions, translating, and exporting subtitles. Supports **English and Chinese**.
 
 ## Download and run
 
@@ -28,7 +28,7 @@ See [WhisperX setup](WHISPERX_SETUP.md) for manual installation, GPU, and offlin
 1. **Import:** Open a local video, or preview a video URL, select its quality, and download.
 2. **Transcribe:** Choose the source language and run WhisperX. Captions are aligned to the audio automatically.
 3. **Edit:** Correct text and timing against the video and waveform. Re-align captions after source edits.
-4. **Translate:** Choose the target language. Optionally enter a description, style, and glossary under **Translation context**, then **Save guidance**. Glossaries can be saved globally or exported and imported.
+4. **AI Translate Support:** Choose the target language. Optionally enter a description, style, and glossary under **Translation context**, then **Save guidance**. Glossaries can be saved globally or exported and imported. API is not included.
 5. **Review:** Check translations, timing, and flagged issues. The preview shows translated subtitles when available. Source edits mark translations stale.
 6. **Save and export:** Save a `.captionproj` to retain your work, then export separate source and translated SRT files. Autosave supports recovery.
 
