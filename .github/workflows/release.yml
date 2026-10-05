@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: raccoon-windows-release
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   windows:
