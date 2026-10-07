@@ -3,6 +3,11 @@ import type { SavedWaveform } from "./waveform";
 import type { TranslationOptions, TranslationBatchEvent } from "./translation";
 import type { DownloadQuality, VideoPreview } from "./download";
 import type { GlossaryFile, GlossaryScope } from "./glossary";
+import type {
+  RuntimeProfile,
+  SpeechDevice,
+  SpeechRuntimeStatus,
+} from "./speech-runtime";
 export type Settings = {
   ffmpeg: string;
   ffprobe: string;
@@ -12,7 +17,11 @@ export type Settings = {
   speechEngine: "whisperx" | "whispercpp";
   whisperxPython: string;
   whisperxModel: string;
-  whisperxDevice: "cpu" | "cuda";
+  whisperxDevice: SpeechDevice;
+  whisperxManaged?: boolean;
+  whisperxRuntimeRoot?: string;
+  whisperxBatchLimit?: number;
+  whisperxPrecision?: "float16" | "int8_float16";
   whisperxCache: string;
   whisperxOffline: boolean;
   endpoint: string;
@@ -29,8 +38,9 @@ export type Job = {
 };
 export type Event =
   | TranslationBatchEvent
-  | { type: "speechInstalled"; python: string }
+  | { type: "speechInstalled"; python: string; profile?: RuntimeProfile }
   | { type: "closing" }
+  | { type: "speechFailed"; projectId: string; speechRun: SpeechRun }
   | { type: "job"; job: Job }
   | {
       type: "wave";
@@ -79,7 +89,10 @@ export type Requests = {
   glossaryExport: { input: GlossaryFile; output: string | null };
   glossaryLoadGlobal: { input: GlossaryScope; output: GlossaryFile | null };
   glossarySaveGlobal: { input: GlossaryFile; output: number };
-  pick: { input: "media" | "model" | "exe"; output: string | null };
+  pick: {
+    input: "media" | "audio" | "model" | "exe" | "folder";
+    output: string | null;
+  };
   open: { input: void; output: { project: Project; path: string } | null };
   save: {
     input: { project: Project; path?: string; autosave?: boolean };
@@ -112,14 +125,20 @@ export type Requests = {
   };
   realign: { input: { project: Project; ids: string[] }; output: string };
   checkSpeech: { input: void; output: string };
-  installSpeech: { input: void; output: string };
+  installSpeech: { input: void | { profile: RuntimeProfile }; output: string };
+  speechRuntime: { input: void; output: SpeechRuntimeStatus };
+  cleanupSpeech: { input: void; output: string };
   translate: {
     input: { project: Project; requestId: string; options: TranslationOptions };
     output: string;
   };
   cancel: { input: string; output: void };
   export: {
-    input: { project: Project; track: "source" | "target" };
+    input: {
+      project: Project;
+      track: "source" | "target";
+      format?: "srt" | "txt";
+    };
     output: string | null;
   };
   url: { input: string; output: string };

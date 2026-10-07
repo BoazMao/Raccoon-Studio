@@ -13,15 +13,29 @@ import { Readable } from "node:stream";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { ProjectSchema, srt, type Project } from "../shared/model";
+import {
+  ProjectSchema,
+  srt,
+  timestampedText,
+  type Project,
+} from "../shared/model";
 import { captionsFromWhisperJson, dtwPreset } from "../shared/alignment";
 import type { Settings, Requests, Event } from "../shared/ipc";
 import { Jobs, run } from "./jobs";
-import { whisperXJob } from "./whisperx";
+import { whisperXJob, SpeechJobError } from "./whisperx";
 import { readProject, writeProject } from "./storage";
 import { migrateProfile } from "./profile";
 import { toolDefaults, restoreTool, persistTool } from "./tools";
-import { installWhisperX, managedPython } from "./install-whisperx";
+import {
+  installWhisperX,
+  managedPython,
+  managedRuntime,
+  markRuntimeVerified,
+  cleanupRuntime,
+} from "./install-whisperx";
+import { SpeechResource } from "./speech-resource";
+import { speechStatus } from "./speech-status";
+import { RuntimeProfileSchema } from "../shared/speech-runtime";
 import {
   restoreWaveform,
   sameWaveformSource,
@@ -61,6 +75,7 @@ const emit = (event: Event) => {
     window.webContents.send("studio:event", event);
 };
 const jobs = new Jobs(emit);
+const speechResource = new SpeechResource();
 const data = () => app.getPath("userData");
 const settingsFile = () => path.join(data(), "settings.json");
 function registerMedia(file: string) {
@@ -105,14 +120,22 @@ async function inspect(file: string, signal: AbortSignal) {
     signal,
   );
   const info = JSON.parse(raw),
-    video = info.streams.find((s: any) => s.codec_type === "video");
-  if (!video) throw Error("The file has no video stream");
-  const [n, d] = String(video.avg_frame_rate || "30/1")
+    video = info.streams.find(
+      (s: any) => s.codec_type === "video" && !s.disposition?.attached_pic,
+    ),
+    audio = info.streams.find((s: any) => s.codec_type === "audio");
+  if (!video && !audio)
+    throw Error("The file has no playable audio or video stream");
+  const [n, d] = String(video?.avg_frame_rate || "30/1")
     .split("/")
     .map(Number);
   return {
     path: file,
-    duration: Number(info.format.duration) || Number(video.duration) || 0,
+    kind: video ? ("video" as const) : ("audio" as const),
+    duration:
+      Number(info.format.duration) ||
+      Number(video?.duration || audio?.duration) ||
+      0,
     fps: n / d || 30,
   };
 }
@@ -139,6 +162,8 @@ function progress(duration: number, update: (n: number, m: string) => void) {
 }
 async function setup() {
   const runtimeRoot = path.join(data(), "runtime", "whisperx");
+  const rootFor = (config: Settings) =>
+    config.whisperxRuntimeRoot || runtimeRoot;
   const managed = await managedPython(runtimeRoot);
   const defaults: Settings = {
     ...toolDefaults(process.resourcesPath, app.getAppPath(), existsSync),
@@ -155,6 +180,9 @@ async function setup() {
     })(),
     whisperxModel: "medium",
     whisperxDevice: "cpu",
+    whisperxManaged: Boolean(managed),
+    whisperxBatchLimit: 0,
+    whisperxPrecision: "float16",
     whisperxCache: path.join(data(), "models", "whisperx"),
     whisperxOffline: false,
     endpoint: "https://api.openai.com/v1",
@@ -174,6 +202,16 @@ async function setup() {
         raw.whisperxPython === "python" || !raw.whisperxPython
           ? defaults.whisperxPython
           : raw.whisperxPython,
+      whisperxManaged:
+        raw.whisperxManaged ??
+        Boolean(
+          managed &&
+          (!raw.whisperxPython ||
+            raw.whisperxPython === "python" ||
+            path
+              .resolve(raw.whisperxPython)
+              .startsWith(path.resolve(runtimeRoot) + path.sep)),
+        ),
       apiKey:
         raw.secret && safeStorage.isEncryptionAvailable()
           ? safeStorage.decryptString(Buffer.from(raw.secret, "base64"))
@@ -182,6 +220,9 @@ async function setup() {
   } catch {
     settings = defaults;
   }
+  const selectedManaged = await managedPython(rootFor(settings));
+  if (settings.whisperxManaged && selectedManaged)
+    settings.whisperxPython = selectedManaged;
   handle("closed", () => {
     canClose = true;
     window.close();
@@ -234,7 +275,19 @@ async function setup() {
         speechEngine: z.enum(["whisperx", "whispercpp"]).default("whisperx"),
         whisperxPython: z.string().min(1).default(defaults.whisperxPython),
         whisperxModel: z.string().min(1).default("medium"),
-        whisperxDevice: z.enum(["cpu", "cuda"]).default("cpu"),
+        whisperxDevice: z.enum(["auto", "cpu", "cuda"]).default("auto"),
+        whisperxManaged: z.boolean().optional(),
+        whisperxRuntimeRoot: z
+          .string()
+          .refine(
+            (value) => !value || path.isAbsolute(value),
+            "Runtime folder must be an absolute path",
+          )
+          .optional(),
+        whisperxBatchLimit: z.number().int().min(0).max(16).default(0),
+        whisperxPrecision: z
+          .enum(["float16", "int8_float16"])
+          .default("float16"),
         whisperxCache: z.string().min(1).default(defaults.whisperxCache),
         whisperxOffline: z.boolean().default(false),
         endpoint: z.string().url(),
@@ -242,6 +295,10 @@ async function setup() {
         apiKey: z.string(),
       })
       .parse(input);
+    if (settings.whisperxManaged) {
+      const selectedPython = await managedPython(rootFor(settings));
+      if (selectedPython) settings.whisperxPython = selectedPython;
+    }
     await persistSettings();
   });
   async function persistSettings() {
@@ -263,22 +320,42 @@ async function setup() {
   }
   handle("pick", async (kind) => {
     const result = await dialog.showOpenDialog(window, {
-      properties: ["openFile"],
+      properties: kind === "folder" ? ["openDirectory"] : ["openFile"],
       filters:
-        kind === "media"
-          ? [
-              {
-                name: "Video",
-                extensions: ["mp4", "webm", "mkv", "mov", "avi", "m4v"],
-              },
-            ]
-          : kind === "model"
-            ? [{ name: "Whisper model", extensions: ["bin"] }]
-            : [{ name: "Executable", extensions: ["exe"] }],
+        kind === "folder"
+          ? []
+          : kind === "media"
+            ? [
+                {
+                  name: "Video",
+                  extensions: ["mp4", "webm", "mkv", "mov", "avi", "m4v"],
+                },
+              ]
+            : kind === "audio"
+              ? [
+                  {
+                    name: "Audio",
+                    extensions: [
+                      "wav",
+                      "mp3",
+                      "m4a",
+                      "aac",
+                      "flac",
+                      "ogg",
+                      "opus",
+                      "aiff",
+                      "aif",
+                      "wma",
+                    ],
+                  },
+                ]
+              : kind === "model"
+                ? [{ name: "Whisper model", extensions: ["bin"] }]
+                : [{ name: "Executable", extensions: ["exe"] }],
     });
     if (result.canceled) return null;
     const file = result.filePaths[0];
-    if (kind === "media") registerMedia(file);
+    if (kind === "media" || kind === "audio") registerMedia(file);
     return file;
   });
   handle("url", (file) => registerMedia(trustedFile(file)));
@@ -335,11 +412,11 @@ async function setup() {
   });
   handle("media", (input) => {
     const file = trustedFile(z.string().parse(input.path));
-    return jobs.start("Inspect video", async (signal, update) => {
+    return jobs.start("Inspect media", async (signal, update) => {
       const media = await inspect(file, signal);
       signal.throwIfAborted();
       emit({ type: "media", projectId: input.projectId, media });
-      update(100, "Video ready");
+      update(100, media.kind === "audio" ? "Audio ready" : "Video ready");
     });
   });
   handle("wave", (input) => {
@@ -517,96 +594,247 @@ async function setup() {
   const workerPath = app.isPackaged
     ? path.join(process.resourcesPath, "workers", "whisperx_worker.py")
     : path.join(__dirname, "whisperx_worker.py");
+  const lockDirectory = path.join(path.dirname(workerPath), "speech-runtime");
+  async function resolveSpeech(config: Settings): Promise<Settings> {
+    if (!config.whisperxManaged) return config;
+    const python = await managedPython(rootFor(config));
+    if (!python)
+      throw Error(
+        "Managed WhisperX runtime is missing. Install or repair it in Settings.",
+      );
+    return { ...config, whisperxPython: python };
+  }
+  async function speechJob(...args: Parameters<typeof whisperXJob>) {
+    try {
+      return await whisperXJob(...args);
+    } catch (error) {
+      if (error instanceof SpeechJobError && args[0])
+        emit({
+          type: "speechFailed",
+          projectId: args[0].id,
+          speechRun: error.speechRun,
+        });
+      throw error;
+    }
+  }
+  handle("speechRuntime", () => speechStatus(rootFor(settings)));
+  handle("cleanupSpeech", () => {
+    const selectedRoot = rootFor(settings);
+    return jobs.start("WhisperX cleanup", (signal, update) =>
+      speechResource.use(signal, async () => {
+        update(10, "Removing previous verified managed installations");
+        await cleanupRuntime(selectedRoot);
+      }),
+    );
+  });
   let installing: string | undefined;
-  handle("installSpeech", () => {
+  handle("installSpeech", (input) => {
+    const profile = RuntimeProfileSchema.parse(input?.profile || "cpu");
     if (installing && jobs.active.has(installing)) return installing;
+    const selectedRoot = rootFor(settings);
     installing = jobs.start(
       "WhisperX installation",
       async (signal, update, beginCommit) => {
-        const python = await installWhisperX(runtimeRoot, signal, update, {
-          beginCommit,
-        });
-        settings = {
-          ...settings,
-          whisperxPython: python,
-          speechEngine: "whisperx",
-          whisperxDevice: "cpu",
-        };
-        await persistSettings();
-        emit({ type: "speechInstalled", python });
-        update(
-          100,
-          "WhisperX installed. Models download on first transcription.",
-        );
+        update(0, "Waiting for speech jobs to finish before installation");
+        const release = await speechResource.acquire(signal);
+        try {
+          const python = await installWhisperX(selectedRoot, signal, update, {
+            beginCommit,
+            profile,
+            lockDirectory,
+          });
+          settings = {
+            ...settings,
+            whisperxPython: python,
+            speechEngine: "whisperx",
+            whisperxDevice: profile === "cuda" ? "auto" : "cpu",
+            whisperxManaged: true,
+            whisperxRuntimeRoot: selectedRoot,
+          };
+          await persistSettings();
+          emit({ type: "speechInstalled", python, profile });
+          update(
+            100,
+            `WhisperX ${profile.toUpperCase()} installed. Models are checked on first transcription.`,
+          );
+        } finally {
+          release();
+        }
       },
     );
     return installing;
   });
   handle("checkSpeech", () => {
     const config = { ...settings };
-    return jobs.start("WhisperX setup", async (signal, update) => {
-      const dir = await tempDir();
-      try {
-        await whisperXJob(null, config, dir, workerPath, signal, update);
-      } finally {
-        await rm(dir, { recursive: true, force: true });
-      }
-    });
+    return jobs.start("WhisperX setup", (signal, update) =>
+      speechResource.use(signal, async () => {
+        const dir = await tempDir();
+        try {
+          await whisperXJob(
+            null,
+            await resolveSpeech(config),
+            dir,
+            workerPath,
+            signal,
+            update,
+          );
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      }),
+    );
   });
   handle("realign", (input) => {
     const p = project(input.project),
       ids = z.array(z.string()).min(1).parse(input.ids);
-    if (!p.media) throw Error("Open a video first");
+    if (!p.media) throw Error("Open media first");
     trustedFile(p.media.path);
     const originals = p.captions.filter(
       (c) => ids.includes(c.id) && c.source.trim(),
     );
     if (!originals.length) throw Error("Select captions with source text");
     const config = { ...settings };
-    return jobs.start("Alignment", async (signal, update) => {
-      const dir = await tempDir();
-      try {
-        const { captions, speechRun } = await whisperXJob(
-          p,
-          config,
-          dir,
-          workerPath,
-          signal,
-          update,
-          originals,
-        );
-        signal.throwIfAborted();
-        emit({
-          type: "aligned",
-          speechRun,
-          projectId: p.id,
-          language: p.language,
-          originals,
-          captions,
-        });
-      } finally {
-        await rm(dir, { recursive: true, force: true });
-      }
-    });
+    return jobs.start("Alignment", (signal, update) =>
+      speechResource.use(signal, async () => {
+        const dir = await tempDir();
+        try {
+          const { captions, speechRun } = await speechJob(
+            p,
+            await resolveSpeech(config),
+            dir,
+            workerPath,
+            signal,
+            update,
+            originals,
+          );
+          signal.throwIfAborted();
+          emit({
+            type: "aligned",
+            speechRun,
+            projectId: p.id,
+            language: p.language,
+            originals,
+            captions,
+          });
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      }),
+    );
   });
   handle("transcribe", (input) => {
     const p = project("project" in input ? input.project : input);
     const mode =
       "project" in input ? z.enum(["replace", "add"]).parse(input.mode) : "add";
-    if (!p.media) throw Error("Open a video first");
+    if (!p.media) throw Error("Open audio or video first");
     trustedFile(p.media.path);
     if (settings.speechEngine === "whisperx") {
       const config = { ...settings };
-      return jobs.start("Transcription", async (signal, update) => {
+      return jobs.start("Transcription", (signal, update) =>
+        speechResource.use(signal, async () => {
+          const dir = await tempDir();
+          try {
+            const resolved = await resolveSpeech(config);
+            const { captions, speechRun } = await speechJob(
+              p,
+              resolved,
+              dir,
+              workerPath,
+              signal,
+              update,
+            );
+            signal.throwIfAborted();
+            // Only a completed real model run qualifies the managed installation
+            // for removal of previous versions. CUDA installs must actually use CUDA.
+            const runtime = await managedRuntime(rootFor(config));
+            const execution = speechRun?.raw.execution as
+              | { recognition?: { device?: string }; alignmentDevice?: string }
+              | undefined;
+            if (
+              config.whisperxManaged &&
+              (runtime?.profile === "cpu" ||
+                (execution?.recognition?.device === "cuda" &&
+                  execution.alignmentDevice === "cuda"))
+            )
+              await markRuntimeVerified(
+                rootFor(config),
+                resolved.whisperxPython,
+              );
+            emit({
+              type: "captions",
+              projectId: p.id,
+              captions,
+              mode,
+              originals: p.captions,
+              language: p.language,
+              speechRun,
+            });
+          } finally {
+            await rm(dir, { recursive: true, force: true });
+          }
+        }),
+      );
+    }
+    if (!settings.modelPath)
+      throw Error("Select a whisper.cpp model in Settings");
+    const config = { ...settings };
+    const preset = dtwPreset(config.modelPath);
+    return jobs.start("Transcription", (signal, update) =>
+      speechResource.use(signal, async () => {
         const dir = await tempDir();
         try {
-          const { captions, speechRun } = await whisperXJob(
-            p,
-            config,
-            dir,
-            workerPath,
+          const wav = path.join(dir, "speech.wav"),
+            out = path.join(dir, "captions");
+          await run(
+            config.ffmpeg,
+            [
+              "-y",
+              "-i",
+              p.media!.path,
+              "-vn",
+              "-ar",
+              "16000",
+              "-ac",
+              "1",
+              "-c:a",
+              "pcm_s16le",
+              "-progress",
+              "pipe:2",
+              wav,
+            ],
             signal,
-            update,
+            progress(p.media!.duration, (n, m) => update(n * 0.15, m)),
+          );
+          await run(
+            config.whisper,
+            [
+              "-m",
+              config.modelPath,
+              "-f",
+              wav,
+              "-l",
+              p.language || "auto",
+              "-dtw",
+              preset,
+              "-ojf",
+              "-of",
+              out,
+              "-pp",
+            ],
+            signal,
+            (text) => {
+              const m = text.match(/progress\s*=\s*(\d+)%/);
+              if (m)
+                update(
+                  15 + +m[1] * 0.8,
+                  "Recognizing and aligning speech locally",
+                );
+            },
+          );
+          update(96, "Building captions from aligned tokens");
+          const captions = captionsFromWhisperJson(
+            JSON.parse(await readFile(out + ".json", "utf8")),
+            p.media!.duration,
           );
           signal.throwIfAborted();
           emit({
@@ -616,86 +844,12 @@ async function setup() {
             mode,
             originals: p.captions,
             language: p.language,
-            speechRun,
           });
         } finally {
           await rm(dir, { recursive: true, force: true });
         }
-      });
-    }
-    if (!settings.modelPath)
-      throw Error("Select a whisper.cpp model in Settings");
-    const config = { ...settings };
-    const preset = dtwPreset(config.modelPath);
-    return jobs.start("Transcription", async (signal, update) => {
-      const dir = await tempDir();
-      try {
-        const wav = path.join(dir, "speech.wav"),
-          out = path.join(dir, "captions");
-        await run(
-          config.ffmpeg,
-          [
-            "-y",
-            "-i",
-            p.media!.path,
-            "-vn",
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-c:a",
-            "pcm_s16le",
-            "-progress",
-            "pipe:2",
-            wav,
-          ],
-          signal,
-          progress(p.media!.duration, (n, m) => update(n * 0.15, m)),
-        );
-        await run(
-          config.whisper,
-          [
-            "-m",
-            config.modelPath,
-            "-f",
-            wav,
-            "-l",
-            p.language || "auto",
-            "-dtw",
-            preset,
-            "-ojf",
-            "-of",
-            out,
-            "-pp",
-          ],
-          signal,
-          (text) => {
-            const m = text.match(/progress\s*=\s*(\d+)%/);
-            if (m)
-              update(
-                15 + +m[1] * 0.8,
-                "Recognizing and aligning speech locally",
-              );
-          },
-        );
-        update(96, "Building captions from aligned tokens");
-        const captions = captionsFromWhisperJson(
-          JSON.parse(await readFile(out + ".json", "utf8")),
-          p.media!.duration,
-        );
-        signal.throwIfAborted();
-        emit({
-          type: "captions",
-          projectId: p.id,
-          captions,
-          mode,
-          originals: p.captions,
-          language: p.language,
-        });
-      } finally {
-        await rm(dir, { recursive: true, force: true });
-      }
-    });
+      }),
+    );
   });
   handle("translate", (input) => {
     const p = project(input.project),
@@ -709,41 +863,58 @@ async function setup() {
   });
   handle("compatible", (input) => {
     const p = project(input);
-    if (!p.media) throw Error("Open a video first");
+    if (!p.media) throw Error("Open audio or video first");
     trustedFile(p.media.path);
     const config = { ...settings };
     return jobs.start("Playback copy", async (signal, update) => {
       const dir = await tempDir(),
-        previewPath = path.join(dir, "preview.mp4");
+        previewPath = path.join(
+          dir,
+          p.media!.kind === "audio" ? "preview.wav" : "preview.mp4",
+        );
       try {
         await run(
           config.ffmpeg,
-          [
-            "-y",
-            "-i",
-            p.media!.path,
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0?",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "21",
-            "-pix_fmt",
-            "yuv420p",
-            "-r",
-            String(p.media!.fps),
-            "-c:a",
-            "aac",
-            "-movflags",
-            "+faststart",
-            "-progress",
-            "pipe:2",
-            previewPath,
-          ],
+          p.media!.kind === "audio"
+            ? [
+                "-y",
+                "-i",
+                p.media!.path,
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-c:a",
+                "pcm_s16le",
+                "-progress",
+                "pipe:2",
+                previewPath,
+              ]
+            : [
+                "-y",
+                "-i",
+                p.media!.path,
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "21",
+                "-pix_fmt",
+                "yuv420p",
+                "-r",
+                String(p.media!.fps),
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                "-progress",
+                "pipe:2",
+                previewPath,
+              ],
           signal,
           progress(p.media!.duration, update),
         );
@@ -763,12 +934,22 @@ async function setup() {
   handle("cancel", (id) => jobs.cancel(id));
   handle("export", async (input) => {
     const p = project(input.project);
+    const track = z.enum(["source", "target"]).parse(input.track);
+    const format = z.enum(["srt", "txt"]).parse(input.format || "srt");
+    const contents =
+      format === "txt" ? timestampedText(p, track) : srt(p, track);
     const r = await dialog.showSaveDialog(window, {
-      defaultPath: p.name + "." + input.track + ".srt",
-      filters: [{ name: "SubRip subtitles", extensions: ["srt"] }],
+      defaultPath: p.name + "." + track + "." + format,
+      filters: [
+        {
+          name:
+            format === "txt" ? "Timestamped transcript" : "SubRip subtitles",
+          extensions: [format],
+        },
+      ],
     });
     if (r.canceled || !r.filePath) return null;
-    await writeFile(r.filePath, "\uFEFF" + srt(p, input.track), "utf8");
+    await writeFile(r.filePath, "\uFEFF" + contents, "utf8");
     return r.filePath;
   });
 }
@@ -809,6 +990,13 @@ app.whenReady().then(async () => {
         ".webm": "video/webm",
         ".mov": "video/quicktime",
         ".mkv": "video/x-matroska",
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/ogg",
       };
       const headers: Record<string, string> = {
         "Content-Type": mime[ext] || "application/octet-stream",

@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { mkdir, copyFile } from "node:fs/promises";
+import { mkdir, copyFile, cp } from "node:fs/promises";
 await mkdir("dist", { recursive: true });
 await build({
   entryPoints: ["src/main/main.ts"],
@@ -25,4 +25,5 @@ await build({
 });
 await copyFile("src/renderer/index.html", "dist/index.html");
 await copyFile("scripts/whisperx_worker.py", "dist/whisperx_worker.py");
+await cp("scripts/speech-runtime", "dist/speech-runtime", { recursive: true });
 await copyFile("assets/Raccoon.ico", "dist/Raccoon.ico");

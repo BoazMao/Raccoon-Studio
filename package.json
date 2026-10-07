@@ -22,8 +22,11 @@
     "test:e2e": "node scripts/e2e.cjs",
     "test:translation": "node scripts/translation-e2e.cjs",
     "test:download": "node scripts/download-quality-e2e.cjs",
+    "test:audio": "node scripts/audio-e2e.cjs",
     "test:pipeline": "node scripts/pipeline.cjs",
     "test:install": "node scripts/install-smoke.cjs",
+    "test:gpu": "node scripts/gpu-e2e.cjs",
+    "test:runtime-install": "tsx scripts/validate-speech-install.ts",
     "format": "prettier --write src scripts tests",
     "package": "npm run prepare:tools && npm run build && electron-builder --win portable"
   },
@@ -70,6 +73,10 @@
       {
         "from": "scripts/whisperx_worker.py",
         "to": "workers/whisperx_worker.py"
+      },
+      {
+        "from": "scripts/speech-runtime",
+        "to": "workers/speech-runtime"
       },
       {
         "from": "node_modules/ffmpeg-static/ffmpeg.exe",
