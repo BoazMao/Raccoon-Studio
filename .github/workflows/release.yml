@@ -118,6 +118,7 @@ jobs:
           Copy-Item -LiteralPath README.md,WHISPERX_SETUP.md,LICENSE -Destination release/win-unpacked
           New-Item -ItemType Directory -Path release/win-unpacked/scripts -Force | Out-Null
           Copy-Item -LiteralPath scripts/setup-whisperx.ps1,scripts/requirements-whisperx.txt -Destination release/win-unpacked/scripts
+          Copy-Item -LiteralPath scripts/speech-runtime -Destination release/win-unpacked/scripts -Recurse
           Compress-Archive -Path release/win-unpacked -DestinationPath "release/$asset" -CompressionLevel Optimal
           $hash = (Get-FileHash -LiteralPath "release/$asset" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $asset" | Set-Content -LiteralPath release/SHA256SUMS.txt -Encoding ascii
@@ -158,3 +159,4 @@ jobs:
             verification.png
             workflow-verification.png
           if-no-files-found: ignore
+

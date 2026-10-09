@@ -2,25 +2,27 @@
 
 WhisperX is the default speech engine. The existing whisper.cpp engine remains selectable as a legacy fallback. Existing projects, caption IDs, translations and review states are preserved.
 
-## One-click Windows CPU setup
+## One-click Windows CPU or NVIDIA setup
 
-In the new source/unpackaged build, open **Settings → Install WhisperX**. This downloads a checksum-verified uv installer, private Python 3.12.14, CPU PyTorch/torchaudio 2.8.0, torchvision 0.23.0, WhisperX 3.8.6, and Transformers 4.57.6. A setup check imports recognition and alignment modules before activation. The selected engine, Python executable and CPU device are saved automatically. It does not change system Python, PATH or registry configuration.
+In the local source/unpackaged build, open **Settings → Install WhisperX** for CPU, or **Install GPU support** for NVIDIA CUDA. This downloads a checksum-verified uv installer, private Python 3.12.14, and fully hash-locked dependencies: WhisperX 3.8.6, PyTorch/torchaudio 2.8.0, torchvision 0.23.0, Transformers 4.57.6, CTranslate2 4.8.2 and faster-whisper 1.2.1. The GPU profile includes CUDA 12.8 and cuDNN libraries and also supports CPU operation. It does not change system Python, PATH or registry configuration. No system Python or full CUDA toolkit is needed.
 
 Progress and cancellation appear in the task panel. Once verification succeeds, the brief final activation phase disables Cancel so a completed activation cannot be reported as cancelled. Closing the app waits for activation or cancelled-job cleanup before exiting. Repeated clicks do not start a second simultaneous installation. Failed/cancelled installations remove their incomplete environment and retain the previous active runtime. Reinstall creates and verifies a new environment before selecting it; previous successful environments remain available on disk.
 
-Internet access and at least 6.5 GB free disk space are required. Expect approximately 600 MB of dependency downloads and 2.3 GB installed, before models. The managed runtime is in the app's user-data folder under `runtime/whisperx`. No separate Python installation, administrator access, or API key is required. Model downloads occur on first transcription, not during runtime installation. The installer selects CPU; it does not install CUDA support.
+Internet access and at least **6 GiB free for CPU or 12 GiB for GPU** are required during installation, plus model space. Downloads are approximately 0.8 GiB for CPU or 3.5 GiB for GPU. Link-time PyTorch build libraries are removed only from managed, version-checked installations; inference DLLs remain. The default location is the app's user-data folder under `runtime/whisperx`. **Advanced performance settings → Choose runtime folder** lets you select another drive before installing. Changing the folder does not move an existing installation. Models use the separate cache configured in Settings and download on first use. No administrator access or API key is required.
 
-Published v0.1.1 does not include this button; use the manual setup below with that release.
+These GPU changes are available from source and have not been released. Published builds may offer only the earlier CPU installer.
 
 ## Manual or GPU environment
 
-Install 64-bit Python 3.10–3.13, then run from the project directory:
+Install 64-bit Python **3.12**, then run from the project directory:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/setup-whisperx.ps1
+# NVIDIA profile:
+powershell -ExecutionPolicy Bypass -File scripts/setup-whisperx.ps1 -Profile cuda
 ```
 
-The script creates `.tools/whisperx` and installs WhisperX 3.8.6. To select a specific Python installation, pass `-Python 'C:\path\to\python.exe'`. In Settings, choose **WhisperX**, point **WhisperX Python executable** to `.tools\whisperx\Scripts\python.exe`, select **CPU**, and click **Check WhisperX setup**. The unpacked app includes the worker script; this manual route requires your own Python installation. Models are downloaded separately.
+The script creates `.tools/whisperx` using the same complete dependency locks. Keep `scripts/speech-runtime` alongside it. To select Python, pass `-Python 'C:\path\to\python.exe'`. In Settings, enable **Use a custom Python environment**, point **WhisperX Python executable** to `.tools\whisperx\Scripts\python.exe`, select a device, and click **Check WhisperX setup**. Models are downloaded separately.
 
 The model field accepts a faster-whisper model ID (for example `medium`, `large-v3`, `tiny.en`) or a local CTranslate2 model directory. GGML `.bin` files from whisper.cpp are not compatible. Use a multilingual model for Chinese. The default model is `medium`; smaller models trade recognition quality for lower CPU and memory requirements.
 
@@ -32,7 +34,11 @@ Once the required models have been used, enable **Use cached models only**. Miss
 
 ## GPU setup
 
-NVIDIA acceleration requires a compatible driver, CUDA libraries and CUDA-enabled PyTorch in the selected environment. Follow [WhisperX's installation instructions](https://github.com/m-bain/whisperX#setup-) for its supported versions. Select **NVIDIA GPU (CUDA)** and run the setup check. CPU mode does not require CUDA.
+NVIDIA acceleration requires a CUDA-12.8-compatible NVIDIA driver and sufficient VRAM. The managed GPU installer supplies the matching Python libraries. Settings shows detected GPU, VRAM and driver. Validation used an RTX 3060 Laptop GPU with 6 GiB VRAM and driver 581.80; other hardware has not been tested locally. CPU mode needs no NVIDIA hardware.
+
+**Auto** selects CUDA when available. Recognition uses FP16 by default and a conservative batch based on available VRAM. Memory failures reduce the batch first; Auto can retry on CPU without changing the selected model. Explicit **NVIDIA GPU** reports failures instead of switching to CPU. INT8/FP16 is optional because outputs may differ. Recognition checkpoints and incremental alignment checkpoints let retries reuse completed work. Completed and failed/cancelled partial outputs are retained in project speech archives. Progress records device, precision, batch and fallback reasons.
+
+Speech jobs and runtime maintenance share a cancellable queue; editing and unrelated tasks remain responsive. Each job runs a fresh worker, releasing GPU memory on completion or cancellation. Installation verifies module imports and real CUDA operations; first successful model inference marks the runtime verified. **Remove previous speech runtimes** then removes only obsolete managed environments, preserving the active runtime, custom environments and model cache.
 
 ## Editing workflow
 

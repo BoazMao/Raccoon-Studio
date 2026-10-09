@@ -47,6 +47,7 @@ export const ProjectSchema = z
       .object({
         path: z.string(),
         previewPath: z.string().optional(),
+        kind: z.enum(["video", "audio"]).optional(),
         duration: z.number().finite().nonnegative(),
         fps: z.number().finite().positive(),
       })
@@ -233,6 +234,17 @@ export function srt(p: Project, track: "source" | "target") {
     .map(
       (c, i) =>
         `${i + 1}\r\n${stamp(c.start)} --> ${stamp(c.end)}\r\n${c[track].trim()}\r\n`,
+    )
+    .join("\r\n");
+}
+export function timestampedText(p: Project, track: "source" | "target") {
+  ProjectSchema.parse(p);
+  return [...p.captions]
+    .sort((a, b) => a.start - b.start)
+    .filter((c) => c[track].trim())
+    .map(
+      (c) =>
+        `[${stamp(c.start).replace(",", ".")} → ${stamp(c.end).replace(",", ".")}] ${c[track].trim()}\r\n`,
     )
     .join("\r\n");
 }

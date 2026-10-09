@@ -18,6 +18,7 @@ import { applyRealignment, applyTranscription } from "../shared/whisperx";
 import { waveformMatchesMedia } from "../shared/waveform";
 import { changeLanguages } from "../shared/context";
 import { ContextPanel } from "./ContextPanel";
+import { SpeechRuntimePanel } from "./SpeechRuntimePanel";
 import type { DownloadQuality, VideoPreview } from "../shared/download";
 import {
   applyTranslationBatch,
@@ -60,6 +61,9 @@ function App() {
       useState<TranslationOptions["mode"]>("needed"),
     [checkMeaning, setCheckMeaning] = useState(true),
     [settings, setSettings] = useState<Settings>(),
+    [exportFormat, setExportFormat] = useState<
+      "srt" | "text-source" | "text-target"
+    >("srt"),
     [videoUrl, setVideoUrl] = useState(""),
     [metadata, setMetadata] = useState<VideoPreview>(),
     [downloadQuality, setDownloadQuality] = useState<DownloadQuality>("best"),
@@ -74,7 +78,7 @@ function App() {
     [recovery, setRecovery] = useState<Project | null>(null),
     [initialized, setInitialized] = useState(false);
   const current = useRef(p),
-    video = useRef<HTMLVideoElement>(null),
+    video = useRef<HTMLMediaElement | null>(null),
     past = useRef<Project[]>([]),
     future = useRef<Project[]>([]),
     canvas = useRef<HTMLCanvasElement>(null),
@@ -182,7 +186,7 @@ function App() {
         "Alignment",
         "Translation",
         "Download video",
-        "Inspect video",
+        "Inspect media",
         "Playback copy",
       ].includes(j.kind),
     );
@@ -246,7 +250,7 @@ function App() {
   }
   function step(n: number) {
     video.current?.pause();
-    seek(time + n / (p.media?.fps || 30));
+    seek(time + (p.media?.kind === "audio" ? n : n / (p.media?.fps || 30)));
   }
   function add() {
     const start = Math.min(time, Math.max(0, duration - 0.1)),
@@ -345,8 +349,8 @@ function App() {
     }
     switching.current = false;
   }
-  async function openVideo() {
-    const path = await api.call("pick", "media");
+  async function openVideo(kind: "media" | "audio" = "media") {
+    const path = await api.call("pick", kind);
     if (path) {
       await api.call("save", { project: current.current, autosave: true });
       const next = blank();
@@ -378,7 +382,8 @@ function App() {
                 ...prev,
                 whisperxPython: e.python,
                 speechEngine: "whisperx",
-                whisperxDevice: "cpu",
+                whisperxDevice: e.profile === "cuda" ? "auto" : "cpu",
+                whisperxManaged: true,
               }
             : prev,
         );
@@ -409,6 +414,16 @@ function App() {
         return;
       }
       if (e.projectId !== current.current.id) return;
+      if (e.type === "speechFailed") {
+        commit((prev) => ({
+          ...prev,
+          speechRuns: [...(prev.speechRuns || []), e.speechRun],
+        }));
+        setNotice(
+          `Speech job ${e.speechRun.raw.cancelled ? "cancelled" : "failed"}; completed raw outputs were retained in the project. Captions were preserved.`,
+        );
+        return;
+      }
       if (e.type === "translationBatch") {
         if (e.requestId !== latestTranslation.current) return;
         const result = applyTranslationBatch(current.current, e);
@@ -711,6 +726,11 @@ function App() {
       setHistoryVersion((v) => v + 1);
     }
   }
+  const audioOnly = p.media?.kind === "audio";
+  const Player = audioOnly ? "audio" : "video";
+  useEffect(() => {
+    setExportFormat(audioOnly ? "text-source" : "srt");
+  }, [audioOnly]);
   const shown = sorted.filter(
       (c) => filter === "all" || c.status !== "reviewed",
     ),
@@ -737,11 +757,31 @@ function App() {
         <button onClick={() => void attempt(() => save())}>
           Save project <kbd>Ctrl S</kbd>
         </button>
+        <select
+          aria-label="Export format"
+          value={exportFormat}
+          onChange={(e) =>
+            setExportFormat(e.target.value as typeof exportFormat)
+          }
+        >
+          <option value="srt">SRT · both tracks</option>
+          <option value="text-source">Timestamped text · source</option>
+          <option value="text-target">Timestamped text · translation</option>
+        </select>
         <button
           className="primary"
           disabled={!p.captions.length}
           onClick={() =>
             void attempt(async () => {
+              if (exportFormat !== "srt") {
+                const result = await api.call("export", {
+                  project: p,
+                  track: exportFormat === "text-source" ? "source" : "target",
+                  format: "txt",
+                });
+                if (result) setNotice("Timestamped text exported");
+                return;
+              }
               const source = await api.call("export", {
                 project: p,
                 track: "source",
@@ -753,7 +793,7 @@ function App() {
             })
           }
         >
-          Export SRT ↗
+          {exportFormat === "srt" ? "Export SRT ↗" : "Export text ↗"}
         </button>
       </header>
       <nav>
@@ -774,8 +814,14 @@ function App() {
             4 <b>Review & export</b>
           </span>
         </div>
-        <button disabled={busy} onClick={() => void attempt(openVideo)}>
+        <button disabled={busy} onClick={() => void attempt(() => openVideo())}>
           ＋ Open video
+        </button>
+        <button
+          disabled={busy}
+          onClick={() => void attempt(() => openVideo("audio"))}
+        >
+          ＋ Open audio
         </button>
         <button
           disabled={busy}
@@ -963,6 +1009,12 @@ function App() {
               Windows when saved.
             </p>
           </div>
+          <SpeechRuntimePanel
+            settings={settings}
+            onChange={setSettings}
+            jobs={jobs}
+            api={api}
+          />
           <label>
             Speech engine
             <select
@@ -985,10 +1037,11 @@ function App() {
               onChange={(e) =>
                 setSettings({
                   ...settings,
-                  whisperxDevice: e.target.value as "cpu" | "cuda",
+                  whisperxDevice: e.target.value as Settings["whisperxDevice"],
                 })
               }
             >
+              <option value="auto">Auto (GPU when available)</option>
               <option value="cpu">CPU</option>
               <option value="cuda">NVIDIA GPU (CUDA)</option>
             </select>
@@ -1044,9 +1097,19 @@ function App() {
                 <div className="field">
                   <input
                     type={key === "apiKey" ? "password" : "text"}
+                    readOnly={
+                      key === "whisperxPython" &&
+                      Boolean(settings.whisperxManaged)
+                    }
                     value={settings[key]}
                     onChange={(e) =>
-                      setSettings({ ...settings, [key]: e.target.value })
+                      setSettings({
+                        ...settings,
+                        [key]: e.target.value,
+                        ...(key === "whisperxPython"
+                          ? { whisperxManaged: false }
+                          : {}),
+                      })
                     }
                   />
                   {[
@@ -1065,7 +1128,14 @@ function App() {
                             "pick",
                             key === "modelPath" ? "model" : "exe",
                           );
-                          if (path) setSettings({ ...settings, [key]: path });
+                          if (path)
+                            setSettings({
+                              ...settings,
+                              [key]: path,
+                              ...(key === "whisperxPython"
+                                ? { whisperxManaged: false }
+                                : {}),
+                            });
                         })
                       }
                     >
@@ -1075,50 +1145,12 @@ function App() {
                 </div>
               </label>
             ))}
-          <p>
-            Install WhisperX here without installing Python yourself. CPU setup
-            downloads about 600 MB and needs at least 6.5 GB of free disk space
-            during installation. First transcription downloads the selected
-            model and the language alignment model into the cache. Existing GGML
-            files cannot be used by WhisperX.
-          </p>
-          <button
-            disabled={jobs.some(
-              (job) =>
-                job.kind === "WhisperX installation" && job.state === "running",
-            )}
-            onClick={() =>
-              void attempt(async () => {
-                await api.call("installSpeech", undefined);
-                setNotice(
-                  "Installing WhisperX; see background tasks for progress and cancellation",
-                );
-              })
-            }
-          >
-            {jobs.some(
-              (job) =>
-                job.kind === "WhisperX installation" && job.state === "running",
-            )
-              ? "Installing WhisperX…"
-              : "Install WhisperX"}
-          </button>
-          <button
-            onClick={() =>
-              void attempt(async () => {
-                await api.call("configure", settings);
-                await api.call("checkSpeech", undefined);
-                setNotice("Checking WhisperX; see background tasks");
-              })
-            }
-          >
-            Check WhisperX setup
-          </button>
           <button
             className="primary"
             onClick={() =>
               void attempt(async () => {
                 await api.call("configure", settings);
+                setSettings(await api.call("settings", undefined));
                 setPanel("none");
                 setNotice("Settings saved");
               })
@@ -1131,27 +1163,42 @@ function App() {
       <main>
         <section className="preview">
           <div className="section-head">
-            <h2>Video preview</h2>
+            <h2>{audioOnly ? "Audio preview" : "Video preview"}</h2>
             <span className="pill">
-              {p.media ? `${p.media.fps.toFixed(2)} fps` : "NO MEDIA"}
+              {audioOnly
+                ? "AUDIO"
+                : p.media
+                  ? `${p.media.fps.toFixed(2)} fps`
+                  : "NO MEDIA"}
             </span>
           </div>
           <div className="screen">
             {videoUrl ? (
               <>
-                <video
-                  ref={video}
+                <Player
+                  key={audioOnly ? "audio" : "video"}
+                  ref={(node) => {
+                    video.current = node;
+                  }}
+                  hidden={audioOnly}
                   src={videoUrl}
                   onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
                   onPlay={() => setPlaying(true)}
                   onPause={() => setPlaying(false)}
                   onError={() =>
                     setError(
-                      "Playback failed. Relink missing media, or create an H.264/AAC preview for an unsupported codec.",
+                      "Playback failed. Relink missing media, or create a compatible preview for an unsupported codec.",
                     )
                   }
                   onClick={toggle}
                 />
+                {audioOnly && (
+                  <div className="audio-preview">
+                    <span aria-hidden="true">♫</span>
+                    <strong>{p.media?.path.split(/[\\/]/).pop()}</strong>
+                    <small>Listen and edit against the waveform</small>
+                  </div>
+                )}
                 <div className="subtitle">
                   {currentCaption?.target.trim()
                     ? currentCaption.target
@@ -1173,7 +1220,7 @@ function App() {
           </div>
           <div className="transport">
             <button
-              aria-label="Previous frame"
+              aria-label={audioOnly ? "Back one second" : "Previous frame"}
               disabled={!videoUrl}
               onClick={() => step(-1)}
             >
@@ -1188,7 +1235,7 @@ function App() {
               {playing ? "Ⅱ" : "▶"}
             </button>
             <button
-              aria-label="Next frame"
+              aria-label={audioOnly ? "Forward one second" : "Next frame"}
               disabled={!videoUrl}
               onClick={() => step(1)}
             >
@@ -1214,7 +1261,7 @@ function App() {
           </div>
           <input
             className="seek"
-            aria-label="Seek video"
+            aria-label={audioOnly ? "Seek audio" : "Seek video"}
             type="range"
             min="0"
             max={duration}
@@ -1231,7 +1278,10 @@ function App() {
                 disabled={busy}
                 onClick={() =>
                   void attempt(async () => {
-                    const path = await api.call("pick", "media");
+                    const path = await api.call(
+                      "pick",
+                      audioOnly ? "audio" : "media",
+                    );
                     if (path) {
                       setError("");
                       setPeaks([]);
@@ -1240,7 +1290,7 @@ function App() {
                   })
                 }
               >
-                Relink video
+                {audioOnly ? "Relink audio" : "Relink video"}
               </button>
             ) : (
               <span>No upload required</span>
@@ -1704,7 +1754,7 @@ function App() {
               <div className="wave-label">
                 {p.media
                   ? "Waveform will appear after audio analysis"
-                  : "Open a video to see its waveform"}
+                  : "Open audio or video to see its waveform"}
               </div>
             )}
             <div className="lane source-lane">
@@ -1787,7 +1837,8 @@ function App() {
             Drag to move · Drag edges to trim · Click waveform to seek
           </span>
           <span>
-            Frame step <kbd>←</kbd> <kbd>→</kbd> · Play <kbd>Space</kbd>
+            {audioOnly ? "Seek 1s" : "Frame step"} <kbd>←</kbd> <kbd>→</kbd> ·
+            Play <kbd>Space</kbd>
           </span>
         </div>
       </section>
