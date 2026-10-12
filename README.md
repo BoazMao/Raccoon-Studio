@@ -57,3 +57,7 @@ Run `release/win-unpacked/Raccoon Studio.exe`. Configure transcription and trans
 ## License
 
 Raccoon Studio and whisper.cpp are MIT licensed. Bundled FFmpeg is GPL-3.0-or-later; standalone yt-dlp is GPLv3+. See [LICENSE](LICENSE) and the bundled notices in `resources/tools`.
+
+## Disclaimer
+
+This project is completed with heavy AI help.
