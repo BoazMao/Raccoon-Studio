@@ -56,6 +56,7 @@ export async function whisperXJob(
   }
   const baseRequest = {
     protocol: 2,
+    reuse: config.whisperxReuseWorker !== false,
     requestedDevice: config.whisperxDevice,
     audio,
     output,
@@ -102,8 +103,66 @@ export async function whisperXJob(
         }
       }
   };
+  async function failWithArchive(error: unknown): Promise<never> {
+    const completedText = await readFile(output, "utf8").catch(() => undefined);
+    let completed: Record<string, unknown> | undefined;
+    try {
+      completed = completedText ? JSON.parse(completedText) : undefined;
+    } catch {
+      /* Preserve invalid output too. */
+    }
+    const recognition = await readFile(baseRequest.checkpoint, "utf8")
+      .then(JSON.parse)
+      .catch(() => null);
+    const alignments = await readFile(
+      path.join(dir, "alignment-checkpoint.jsonl"),
+      "utf8",
+    )
+      .then((text) =>
+        text.split(/\r?\n/).flatMap((line) => {
+          try {
+            return line ? [JSON.parse(line)] : [];
+          } catch {
+            return [];
+          }
+        }),
+      )
+      .catch(() => []);
+    if (p && (recognition || alignments.length || completedText)) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new SpeechJobError(message, {
+        id: crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+        mode: originals ? "realignment" : "transcription",
+        captions: [],
+        importError: message,
+        raw: {
+          ...((completed?.raw as Record<string, unknown>) || {}),
+          finalOutput: completed || completedText,
+          transcription:
+            recognition?.transcription ??
+            (completed?.raw as any)?.transcription ??
+            null,
+          alignments: alignments.length
+            ? alignments
+            : (completed?.raw as any)?.alignments || [],
+          model: config.whisperxModel,
+          correctedCaptions: originals ?? null,
+          execution:
+            (completed?.raw as Record<string, unknown> | undefined)
+              ?.execution ??
+            recognition?.execution ??
+            null,
+          failure: failure ?? null,
+          fallbacks,
+          cancelled: signal.aborted,
+        },
+      });
+    }
+    throw error;
+  }
   for (let retries = 0; ; retries++) {
-    signal.throwIfAborted();
+    if (signal.aborted) return failWithArchive(Error("Cancelled"));
     failure = undefined;
     pending = "";
     await writeFile(
@@ -136,45 +195,7 @@ export async function whisperXJob(
             })
           : undefined;
       if (!next) {
-        const recognition = await readFile(baseRequest.checkpoint, "utf8")
-          .then(JSON.parse)
-          .catch(() => null);
-        const alignments = await readFile(
-          path.join(dir, "alignment-checkpoint.jsonl"),
-          "utf8",
-        )
-          .then((text) =>
-            text.split(/\r?\n/).flatMap((line) => {
-              try {
-                return line ? [JSON.parse(line)] : [];
-              } catch {
-                return [];
-              }
-            }),
-          )
-          .catch(() => []);
-        if (p && (recognition || alignments.length)) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          throw new SpeechJobError(message, {
-            id: crypto.randomUUID(),
-            createdAt: new Date().toISOString(),
-            mode: originals ? "realignment" : "transcription",
-            captions: [],
-            importError: message,
-            raw: {
-              transcription: recognition?.transcription ?? null,
-              alignments,
-              model: config.whisperxModel,
-              correctedCaptions: originals ?? null,
-              execution: recognition?.execution ?? null,
-              failure: failure ?? null,
-              fallbacks,
-              cancelled: signal.aborted,
-            },
-          });
-        }
-        throw error;
+        return failWithArchive(error);
       }
       fallbacks.push({ ...failure! });
       attempt = next;
@@ -189,7 +210,7 @@ export async function whisperXJob(
       );
     }
   }
-  signal.throwIfAborted();
+  if (signal.aborted) return failWithArchive(Error("Cancelled"));
   if (!p) return { captions: [], speechRun: undefined };
   const result = JSON.parse(await readFile(output, "utf8"));
   let captions: Caption[] = [],

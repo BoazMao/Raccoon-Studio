@@ -23,6 +23,7 @@ Node.js is only needed for development.
 - **Translation:** In Settings, enter an OpenAI-compatible endpoint, model ID, and API key if required. Translation sends caption text to that endpoint; transcription and alignment stay local.
 
 See [WhisperX setup](WHISPERX_SETUP.md) for manual installation, GPU, and offline details.
+See [performance and quality checks](PERFORMANCE_AND_QUALITY.md) for warm speech reuse, review warnings, and evaluating your own reference clips.
 
 ## Basic workflow
 

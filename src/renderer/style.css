@@ -342,6 +342,39 @@ main {
   flex: 1;
   overflow: auto;
   min-height: 0;
+  overflow-anchor: none;
+}
+.export-readiness {
+  color: #ddc58b;
+  font-size: 11px;
+}
+.export-readiness summary {
+  cursor: pointer;
+}
+.caption-footer {
+  position: relative;
+}
+.export-readiness > div {
+  position: absolute;
+  bottom: 100%;
+  left: 8px;
+  right: 8px;
+  z-index: 8;
+  padding: 12px;
+  border: 1px solid #8f8058;
+  border-radius: 6px;
+  background: #27261e;
+  box-shadow: 0 3px 15px #0008;
+}
+.export-readiness p {
+  margin-bottom: 8px;
+}
+.export-readiness small {
+  margin-left: 12px;
+}
+.export-readiness button {
+  padding: 3px 7px;
+  font-size: 11px;
 }
 .caption-row {
   padding: 9px 10px;
@@ -568,6 +601,22 @@ canvas {
   cursor: grab;
   touch-action: none;
   min-width: 3px;
+}
+.cue-group {
+  position: absolute;
+  top: 2px;
+  height: 28px;
+  min-width: 4px;
+  padding: 0;
+  font-size: 9px;
+  color: #e0f5ed;
+  background: #31574ac9;
+  border: 1px solid #79a793;
+  pointer-events: auto;
+  overflow: hidden;
+}
+.cue-group.overlap {
+  overflow: visible;
 }
 .clip.chosen {
   background: #49745f;

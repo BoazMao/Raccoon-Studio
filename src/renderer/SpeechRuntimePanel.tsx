@@ -144,6 +144,9 @@ export function SpeechRuntimePanel({
       </label>
       <details>
         <summary>Advanced performance settings</summary>
+        <label><input type="checkbox" checked={settings.whisperxReuseWorker!==false} onChange={e=>onChange({...settings,whisperxReuseWorker:e.target.checked})}/> Reuse speech imports between jobs</label>
+        <p>Models are released after each job. The interpreter closes after 90 seconds idle, or immediately on cancellation or failure.</p>
+        <button onClick={()=>void action(()=>api.call("releaseSpeech",undefined))}>Release speech memory</button>
         <label>
           Managed runtime folder (blank = app data)
           <input

@@ -132,9 +132,7 @@ const work = path.join(root, ".tools/test-work/gpu");
         !document.querySelector(".wave-label"),
     );
     const results = [];
-    for (const device of model === "tiny.en"
-      ? ["auto", "cpu"]
-      : ["auto", "cpu", "auto"]) {
+    for (const device of ["auto", "cpu", "auto"]) {
       await page.evaluate(async (device) => {
         window.realSpeech = null;
         window.speechJobs = [];

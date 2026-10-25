@@ -82,6 +82,84 @@ async function provider<T>(
 const response = (value: unknown) => ({
   body: { choices: [{ message: { content: JSON.stringify(value) } }] },
 });
+test("retrying a failed meaning check reuses its draft and invalidates reuse after source edits", async () => {
+  let fail = true;
+  await provider(
+    (body) => {
+      const input = JSON.parse(body.messages[1].content);
+      if (input.proposedTranslations) {
+        if (fail) return { status: 400 };
+        return response({
+          reviews: input.proposedTranslations.map((c: any) => ({
+            ...c,
+            issues: [],
+          })),
+        });
+      }
+      return response({
+        translations: input.captionsToTranslate.map((c: any) => ({
+          id: c.id,
+          text: "保留的草稿",
+        })),
+      });
+    },
+    async (settings, requests) => {
+      let p = project();
+      const apply = (e: Event) => {
+        if (e.type === "translationBatch")
+          p = applyTranslationBatch(p, e).project;
+      };
+      await assert.rejects(
+        translateProject(
+          p,
+          "first",
+          options,
+          settings,
+          new AbortController().signal,
+          () => {},
+          apply,
+        ),
+        /400/,
+      );
+      assert.equal(p.captions[0].translation?.verification?.state, "failed");
+      const count = requests.length;
+      fail = false;
+      await translateProject(
+        p,
+        "retry",
+        options,
+        settings,
+        new AbortController().signal,
+        () => {},
+        apply,
+      );
+      assert.equal(requests.length - count, 1);
+      assert.ok(
+        JSON.parse(requests.at(-1).messages[1].content).proposedTranslations,
+      );
+      assert.equal(p.captions[0].translation?.verification?.state, "complete");
+      p = {
+        ...p,
+        captions: p.captions.map((c) => ({
+          ...c,
+          source: c.source + " Changed",
+          status: "stale" as const,
+        })),
+      };
+      const next = requests.length;
+      await translateProject(
+        p,
+        "edited",
+        options,
+        settings,
+        new AbortController().signal,
+        () => {},
+        apply,
+      );
+      assert.equal(requests.length - next, 2);
+    },
+  );
+});
 
 test("fatal meaning errors preserve completed drafts and stop before the next batch", async () => {
   for (const status of [400, 401]) {

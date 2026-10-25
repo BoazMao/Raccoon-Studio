@@ -12,6 +12,7 @@ import time
 
 STAGE = "runtime"
 DEVICE = "cpu"
+HUB_LOAD = None
 
 
 def event(value):
@@ -51,12 +52,13 @@ def finite(value):
     return float(value) if value is not None and math.isfinite(float(value)) else None
 
 
-def main():
-    global STAGE, DEVICE
+def main(request_file=None):
+    global STAGE, DEVICE, HUB_LOAD
+    STAGE = "runtime"
     started = time.perf_counter()
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
-    request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    request = json.loads(Path(request_file or sys.argv[1]).read_text(encoding="utf-8"))
     DEVICE = "cuda" if request["device"] in ("auto", "cuda") else "cpu"
     if request.get("protocol", 1) not in (1, 2):
         raise RuntimeError("Unsupported speech worker protocol")
@@ -81,6 +83,9 @@ def main():
     import whisperx
     import nltk
     import ctranslate2
+    timings = {"importsSeconds": time.perf_counter() - started}
+    if HUB_LOAD is None:
+        HUB_LOAD = torch.hub.load
     torch.set_num_threads(max(1, min(4, (os.cpu_count() or 2) - 1)))
     torch.hub.set_dir(str(cache / "torch"))
     nltk.data.path.insert(0, str(cache / "nltk"))
@@ -140,7 +145,7 @@ def main():
     recognition_seconds = 0
     if originals is None:
         # WhisperX loads Silero via torch.hub. Resolve cached code locally so offline mode never probes GitHub.
-        hub_load = torch.hub.load
+        hub_load = HUB_LOAD
         def cached_hub_load(repo_or_dir, *args, **kwargs):
             if repo_or_dir == "snakers4/silero-vad":
                 cached = next((p for p in (cache / "torch").glob("snakers4_silero-vad_*") if (p / "hubconf.py").exists()), None)
@@ -165,8 +170,11 @@ def main():
             model = whisperx.load_model(request["model"], device, compute_type=compute_type,
                 language=request["language"], vad_method="silero", download_root=str(cache / "asr"),
                 local_files_only=request.get("offline", False))
+            timings["recognitionLoadSeconds"] = time.perf_counter() - recognition_started
+            inference_started = time.perf_counter()
             progress(30, f"Transcribing on {device.upper()} · batch {batch} · {compute_type}")
             result = model.transcribe(audio, batch_size=batch, language=request["language"], progress_callback=lambda n: progress(30 + n * 0.3, f"Transcribing on {device.upper()} · batch {batch}"))
+            timings["recognitionInferenceSeconds"] = time.perf_counter() - inference_started
             recognition_seconds = time.perf_counter() - recognition_started
             atomic_json(checkpoint, {"transcription": result, "execution": execution, "seconds": recognition_seconds})
             del model
@@ -188,6 +196,7 @@ def main():
         align_name = "facebook/wav2vec2-base-960h" if request["language"] == "en" else "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
         align_model, metadata = whisperx.load_align_model(request["language"], alignment_device,
             model_name=align_name, model_dir=str(cache / "alignment"), model_cache_only=request.get("offline", False))
+        timings["alignmentLoadSeconds"] = time.perf_counter() - alignment_started
     aligned = []
     raw_alignments = []
     if request.get("resume") and alignment_checkpoint.exists():
@@ -204,8 +213,10 @@ def main():
         if index < len(raw_alignments):
             result = raw_alignments[index]["output"]
         else:
+            inference_started = time.perf_counter()
             result = whisperx.align([segment], align_model, metadata, audio, alignment_device,
                 interpolate_method="ignore", return_char_alignments=True)
+            timings["alignmentInferenceSeconds"] = timings.get("alignmentInferenceSeconds", 0) + time.perf_counter() - inference_started
             raw_alignments.append({"input": segment, "output": result, "device": alignment_device})
             with alignment_checkpoint.open("a", encoding="utf-8") as checkpoint_file:
                 checkpoint_file.write(json.dumps(json_safe(raw_alignments[-1]), ensure_ascii=False, allow_nan=False) + '\n')
@@ -223,6 +234,7 @@ def main():
             aligned.append({"id": segment.get("id"), "start": finite(sentence.get("start")),
                 "end": finite(sentence.get("end")), "text": sentence["text"],
                 "window": {"start": segment["start"], "end": segment["end"]},
+                "recognitionLogprob": finite(segment.get("avg_logprob")),
                 "units": [{"text": w["word"], "start": finite(w.get("start")), "end": finite(w.get("end")),
                     "confidence": finite(w.get("score"))} for w in sentence.get("words", [])]})
         progress(65 + 32 * (index + 1) / max(1, len(segments)), f"Aligning on {alignment_device.upper()} {index + 1}/{len(segments)}")
@@ -230,6 +242,7 @@ def main():
         "raw": {"transcription": transcription, "alignments": raw_alignments,
             "model": request["model"], "device": recognition_execution["device"], "whisperxVersion": importlib.metadata.version("whisperx"),
             "execution": {"recognition": recognition_execution, "alignmentDevice": alignment_device,
+                "stages": timings,
                 "recognitionSeconds": recognition_seconds, "alignmentSeconds": time.perf_counter() - alignment_started,
                 "workerSeconds": time.perf_counter() - started, "fallbacks": request.get("fallbacks", [])},
             "correctedCaptions": originals}}
@@ -237,9 +250,10 @@ def main():
     progress(99, "Alignment complete")
 
 
-if __name__ == "__main__":
+def execute(request_file=None):
     try:
-        main()
+        main(request_file)
+        return True
     except Exception as error:
         message = str(error)
         lowered = message.lower()
@@ -253,4 +267,21 @@ if __name__ == "__main__":
                 code = "cuda_unavailable"
         event({"type": "failure", "code": code, "stage": STAGE, "message": message})
         print(f"WhisperX: {error}", file=sys.stderr, flush=True)
-        sys.exit(1)
+        return False
+
+if __name__ == "__main__":
+    if sys.argv[1] == "--serve":
+        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+        for line in sys.stdin:
+            ok = execute(json.loads(line))
+            # Never keep a model or a tensor from a completed request alive.
+            gc.collect()
+            if "torch" in sys.modules and sys.modules["torch"].cuda.is_available():
+                sys.modules["torch"].cuda.empty_cache()
+            event({"type": "workerDone", "ok": ok})
+            if not ok:
+                break
+    else:
+        sys.exit(0 if execute() else 1)

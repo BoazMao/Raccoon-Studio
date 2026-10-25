@@ -19,6 +19,7 @@ export type Settings = {
   whisperxModel: string;
   whisperxDevice: SpeechDevice;
   whisperxManaged?: boolean;
+  whisperxReuseWorker?: boolean;
   whisperxRuntimeRoot?: string;
   whisperxBatchLimit?: number;
   whisperxPrecision?: "float16" | "int8_float16";
@@ -53,6 +54,7 @@ export type Event =
   | { type: "media"; projectId: string; media: NonNullable<Project["media"]> }
   | {
       type: "captions";
+      mediaPath?: string;
       projectId: string;
       captions: Caption[];
       mode?: "replace" | "add";
@@ -62,6 +64,7 @@ export type Event =
     }
   | {
       type: "aligned";
+      mediaPath?: string;
       speechRun?: SpeechRun;
       projectId: string;
       language: string;
@@ -83,6 +86,8 @@ export type Requests = {
   clipboardRead: { input: void; output: string };
   clipboardWrite: { input: string; output: void };
   closed: { input: void; output: void };
+  stopJobs: { input: void; output: void };
+  releaseSpeech: { input: void; output: string };
   settings: { input: void; output: Settings };
   configure: { input: Settings; output: void };
   glossaryImport: { input: void; output: GlossaryFile | null };
@@ -142,6 +147,10 @@ export type Requests = {
     output: string | null;
   };
   url: { input: string; output: string };
+  frameTime: {
+    input: { path: string; time: number; direction: -1 | 1 };
+    output: number;
+  };
 };
 export interface Bridge {
   call<K extends keyof Requests>(

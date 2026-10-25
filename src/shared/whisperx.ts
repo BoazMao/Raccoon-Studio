@@ -21,6 +21,7 @@ export const WhisperXResult = z.object({
       end: z.number().finite().nonnegative().nullable(),
       text: z.string(),
       units: z.array(Unit),
+      recognitionLogprob: z.number().finite().nullable().optional(),
       window: z.object({ start: z.number(), end: z.number() }).optional(),
     }),
   ),
@@ -96,6 +97,14 @@ export function importWhisperX(
           status: "empty",
         }),
         source: original?.source ?? segment.text,
+        ...(!original && segment.recognitionLogprob != null
+          ? {
+              recognition: {
+                avgLogprob: segment.recognitionLogprob,
+                needsReview: segment.recognitionLogprob < -1,
+              },
+            }
+          : {}),
         start: aligned ? Math.max(0, start - 0.05) : start,
         end: aligned ? Math.min(duration, end + 0.05) : end,
         alignment: {
