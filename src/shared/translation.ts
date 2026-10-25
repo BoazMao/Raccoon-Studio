@@ -11,6 +11,12 @@ export const TranslationMetaSchema = z.object({
   model: z.string().optional(),
   createdAt: z.string().optional(),
   issues: z.array(TranslationIssueSchema).max(30).default([]),
+  verification: z
+    .object({
+      state: z.enum(["complete", "failed", "skipped"]),
+      key: z.string(),
+    })
+    .optional(),
 });
 export const TranslationOptionsSchema = z.object({
   mode: z.enum(["needed", "selected", "replace"]).default("needed"),
@@ -23,12 +29,14 @@ export type TranslationBatch = {
   captions: Caption[];
   before: Caption[];
   after: Caption[];
+  between: Caption[];
 };
 export type TranslationResult = {
   id: string;
   text: string;
   issues: TranslationIssue[];
   error?: string;
+  verification?: z.infer<typeof TranslationMetaSchema>["verification"];
 };
 export type TranslationBatchEvent = {
   type: "translationBatch";
@@ -54,25 +62,38 @@ export function translationBatches(
     (options.mode === "replace" ||
       (options.mode === "selected"
         ? selected.has(c.id)
-        : ["empty", "stale", "failed"].includes(c.status)));
+        : !c.target.trim() ||
+          ["empty", "stale", "failed"].includes(c.status) ||
+          c.translation?.verification?.state === "failed"));
   const batches: TranslationBatch[] = [];
   let captions: Caption[] = [],
     start = 0,
     end = 0,
-    chars = 0;
+    chars = 0,
+    contextChars = 0;
   const flush = () => {
     if (captions.length)
       batches.push({
         captions,
         before: all.slice(Math.max(0, start - 3), start),
         after: all.slice(end + 1, end + 4),
+        between: all
+          .slice(start, end + 1)
+          .filter((c) => !captions.some((item) => item.id === c.id)),
       });
     captions = [];
     chars = 0;
+    contextChars = 0;
   };
   all.forEach((c, i) => {
     if (!eligible(c)) {
-      flush();
+      if (
+        captions.length &&
+        (contextChars + Math.min(3000, c.source.length) > 6000 ||
+          i - start >= 40)
+      )
+        flush();
+      else if (captions.length) contextChars += Math.min(3000, c.source.length);
       return;
     }
     if (c.source.length > 12000)
@@ -194,6 +215,7 @@ export function applyTranslationBatch(
           ...result.issues.filter((i) => i.kind !== "readability"),
           ...readabilityIssues(result.text, c.end - c.start, p.targetLanguage),
         ],
+        verification: result.verification,
       },
     };
   });

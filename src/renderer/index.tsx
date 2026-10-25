@@ -1,4 +1,9 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  useMemo,
+} from "react";
 import { createRoot } from "react-dom/client";
 import {
   blank,
@@ -7,6 +12,7 @@ import {
   split,
   merge,
   translated,
+  restoreEdit,
   stamp,
   type Project,
   type Caption,
@@ -18,6 +24,10 @@ import { applyRealignment, applyTranscription } from "../shared/whisperx";
 import { waveformMatchesMedia } from "../shared/waveform";
 import { changeLanguages } from "../shared/context";
 import { ContextPanel } from "./ContextPanel";
+import { CaptionList } from "./CaptionList";
+import { operationProject } from "../shared/operations";
+import { exportReadiness } from "../shared/quality";
+import { timelineOverview } from "../shared/timeline";
 import { SpeechRuntimePanel } from "./SpeechRuntimePanel";
 import type { DownloadQuality, VideoPreview } from "../shared/download";
 import {
@@ -32,6 +42,9 @@ declare global {
 }
 const api = window.studio;
 const zoomSteps = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+function timelineWidth(el: HTMLElement) {
+  return el.firstElementChild?.getBoundingClientRect().width || 1;
+}
 function rulerStep(seconds: number) {
   const raw = Math.max(0.001, seconds);
   const power = 10 ** Math.floor(Math.log10(raw));
@@ -95,9 +108,12 @@ function App() {
       end: number;
       before: Project;
       ids: string[];
+      origins: Map<string, Caption>;
     } | null>(null),
     switching = useRef(false);
+  const stepping = useRef(Promise.resolve());
   current.current = p;
+  const loadGeneration = useRef(0);
   pendingRecovery.current = recovery;
   useEffect(() => {
     setSelection((ids) => {
@@ -173,12 +189,36 @@ function App() {
     setSelection(captions.map((c) => c.id));
     setNotice(`Pasted ${captions.length} captions at the playhead`);
   }
-  const duration = p.media?.duration || 30,
+  const sorted = useMemo(
+    () => [...p.captions].sort((a, b) => a.start - b.start),
+    [p.captions],
+  );
+  const overlaps = useMemo(() => overlappingCaptions(p.captions), [p.captions]);
+  const actionRef = useRef({ choose, seek, edit, fail });
+  actionRef.current = { choose, seek, edit, fail };
+  const captionActions = useMemo(
+    () => ({
+      choose: (...a: Parameters<typeof choose>) =>
+        actionRef.current.choose(...a),
+      seek: (...a: Parameters<typeof seek>) => actionRef.current.seek(...a),
+      edit: (...a: Parameters<typeof edit>) => actionRef.current.edit(...a),
+      fail: (e: unknown) => actionRef.current.fail(e),
+    }),
+    [],
+  );
+  const [visibleTime, setVisibleTime] = useState({
+    start: 0,
+    end: Infinity,
+    pixels: 1000,
+  });
+  const fallbackDuration = useMemo(
+    () => p.captions.reduce((end, c) => Math.max(end, c.end), 30),
+    [p.captions],
+  );
+  const duration = p.media?.duration || fallbackDuration,
     tickStep = rulerStep(duration / zoom / 8),
     tickCount = Math.floor(duration / tickStep) + 1,
     active = p.captions.find((c) => c.id === selected),
-    sorted = [...p.captions].sort((a, b) => a.start - b.start),
-    overlaps = overlappingCaptions(p.captions),
     running = jobs.filter((j) => j.state === "running"),
     busy = running.some((j) =>
       [
@@ -193,6 +233,33 @@ function App() {
   function fail(e: unknown) {
     setError(e instanceof Error ? e.message : String(e));
   }
+  const overview = useMemo(
+    () =>
+      timelineOverview(
+        sorted,
+        selected,
+        duration,
+        visibleTime.pixels * zoom,
+        visibleTime.start,
+        visibleTime.end,
+        overlaps,
+      ),
+    [sorted, selected, duration, zoom, visibleTime, overlaps],
+  );
+  useEffect(() => {
+    const el = timelineScroll.current;
+    if (!el) return;
+    const update = () =>
+      setVisibleTime({
+        start: Math.max(0, (el.scrollLeft / timelineWidth(el)) * duration - 1),
+        end: ((el.scrollLeft + el.clientWidth) / timelineWidth(el)) * duration + 1,
+        pixels: el.clientWidth,
+      });
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    update();
+    return () => observer.disconnect();
+  }, [duration, zoom]);
   async function attempt<T>(fn: () => Promise<T>) {
     try {
       return await fn();
@@ -217,8 +284,17 @@ function App() {
     const prev = past.current.pop();
     if (prev) {
       future.current.push(current.current);
-      current.current = prev;
-      setP(prev);
+      current.current = restoreEdit(prev, current.current);
+      setP(current.current);
+      if (
+        prev.media?.path !== future.current.at(-1)?.media?.path ||
+        prev.media?.previewPath !== future.current.at(-1)?.media?.previewPath
+      ) {
+        setPeaks([]);
+        setVideoUrl("");
+        if (prev.media) void attempt(() => prepareMedia(current.current));
+      }
+      setSaved("Unsaved changes");
       setHistoryVersion((v) => v + 1);
     }
   }
@@ -226,8 +302,17 @@ function App() {
     const next = future.current.pop();
     if (next) {
       past.current.push(current.current);
-      current.current = next;
-      setP(next);
+      current.current = restoreEdit(next, current.current);
+      setP(current.current);
+      if (
+        next.media?.path !== past.current.at(-1)?.media?.path ||
+        next.media?.previewPath !== past.current.at(-1)?.media?.previewPath
+      ) {
+        setPeaks([]);
+        setVideoUrl("");
+        if (next.media) void attempt(() => prepareMedia(current.current));
+      }
+      setSaved("Unsaved changes");
       setHistoryVersion((v) => v + 1);
     }
   }
@@ -238,10 +323,15 @@ function App() {
     }));
   }
   function seek(t: number) {
+    const next = Math.max(0, Math.min(duration, t));
     if (video.current) {
-      video.current.currentTime = Math.max(0, Math.min(duration, t));
-      setTime(video.current.currentTime);
+      try {
+        video.current.currentTime = next;
+      } catch {
+        setNotice("Relink media to preview this time.");
+      }
     }
+    setTime(next);
   }
   function toggle() {
     if (!video.current || !videoUrl) return;
@@ -250,7 +340,50 @@ function App() {
   }
   function step(n: number) {
     video.current?.pause();
-    seek(time + (p.media?.kind === "audio" ? n : n / (p.media?.fps || 30)));
+    const media = current.current.media,
+      element = video.current;
+    if (!media || !element) return;
+    stepping.current = stepping.current
+      .catch(() => {})
+      .then(async () => {
+        if (
+          video.current !== element ||
+          current.current.media?.path !== media.path
+        )
+          return;
+        const position = element.currentTime;
+        let next = position + n;
+        if (media.kind !== "audio") {
+          try {
+            next = await api.call("frameTime", {
+              path: media.previewPath || media.path,
+              time: position,
+              direction: n < 0 ? -1 : 1,
+            });
+          } catch {
+            next = position + n / media.fps;
+            setNotice(
+              "Frame timestamps unavailable; using a nominal frame step.",
+            );
+          }
+        }
+        if (
+          video.current !== element ||
+          current.current.media?.path !== media.path
+        )
+          return;
+        seek(next);
+        if (element.seeking)
+          await new Promise<void>((resolve) => {
+            const done = () => {
+              clearTimeout(timer);
+              element.removeEventListener("seeked", done);
+              resolve();
+            };
+            const timer = setTimeout(done, 1000);
+            element.addEventListener("seeked", done, { once: true });
+          });
+      });
   }
   function add() {
     const start = Math.min(time, Math.max(0, duration - 0.1)),
@@ -312,6 +445,7 @@ function App() {
     });
   }
   async function load(next: Project, path?: string) {
+    loadGeneration.current++;
     const sourceLanguage = ["zh", "Chinese"].includes(next.language)
       ? "zh"
       : "en";
@@ -359,12 +493,19 @@ function App() {
     }
   }
   async function save(as = false) {
+    const snapshot = current.current;
+    const generation = loadGeneration.current;
     const path = await api.call("save", {
-      project: current.current,
+      project: snapshot,
       path: as ? undefined : file,
     });
-    if (path) {
+    if (
+      path &&
+      current.current.id === snapshot.id &&
+      generation === loadGeneration.current
+    ) {
       setFile(path);
+      if (current.current === snapshot) setSaved("Saved");
       setNotice("Project saved");
     }
   }
@@ -394,6 +535,7 @@ function App() {
       }
       if (e.type === "closing") {
         void attempt(async () => {
+          await api.call("stopJobs", undefined);
           if (
             !pendingRecovery.current ||
             current.current.media ||
@@ -414,6 +556,25 @@ function App() {
         return;
       }
       if (e.projectId !== current.current.id) return;
+      if (
+        (e.type === "captions" || e.type === "aligned") &&
+        e.language &&
+        (e.language !== current.current.language ||
+          (e.mediaPath && e.mediaPath !== current.current.media?.path))
+      ) {
+        if (e.speechRun)
+          commit(
+            (prev) => ({
+              ...prev,
+              speechRuns: [...(prev.speechRuns || []), e.speechRun!],
+            }),
+            false,
+          );
+        setNotice(
+          "Speech output retained; captions were not changed because the source media or language changed.",
+        );
+        return;
+      }
       if (e.type === "speechFailed") {
         commit((prev) => ({
           ...prev,
@@ -527,7 +688,9 @@ function App() {
       if (switching.current || !initialized || recovery) return;
       void api
         .call("save", { project: p, autosave: true })
-        .then(() => setSaved("Autosaved"))
+        .then(() => {
+          if (current.current === p) setSaved("Autosaved");
+        })
         .catch(fail);
     }, 700);
     return () => clearTimeout(timer);
@@ -535,12 +698,13 @@ function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const input = (e.target as HTMLElement).matches("input,textarea,select");
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         void attempt(() => save(e.shiftKey));
         return;
       }
       if (input) return;
+      if (e.altKey) return;
       const editing = (e.target as HTMLElement).closest(
         ".timeline,.caption-scroll",
       );
@@ -558,13 +722,14 @@ function App() {
         else void attempt(() => copySelected(key === "x"));
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         e.shiftKey ? redo() : undo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === "y") {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
         e.preventDefault();
         redo();
-      } else if (e.code === "Space") {
+      } else if (e.ctrlKey || e.metaKey) return;
+      else if (e.code === "Space") {
         e.preventDefault();
         toggle();
       } else if (e.key === "ArrowLeft") {
@@ -611,7 +776,7 @@ function App() {
       const w = scroll.clientWidth,
         h = el.clientHeight,
         scale = Math.min(devicePixelRatio, 2),
-        timelineWidth = scroll.scrollWidth;
+        width = timelineWidth(scroll);
       el.style.width = `${w}px`;
       el.width = Math.round(w * scale);
       el.height = Math.round(h * scale);
@@ -621,12 +786,12 @@ function App() {
       ctx.fillStyle = "#4d9f93";
       for (let x = 0; x < w; x += 2) {
         const a = Math.floor(
-            ((scroll.scrollLeft + x) / timelineWidth) * peaks.length,
+            ((scroll.scrollLeft + x) / width) * peaks.length,
           ),
           b = Math.max(
             a + 1,
             Math.floor(
-              ((scroll.scrollLeft + x + 2) / timelineWidth) * peaks.length,
+              ((scroll.scrollLeft + x + 2) / width) * peaks.length,
             ),
           );
         let peak = 0;
@@ -649,7 +814,7 @@ function App() {
     if (!scroll) return;
     scroll.scrollLeft = Math.max(
       0,
-      (time / duration) * scroll.scrollWidth - scroll.clientWidth / 2,
+      (time / duration) * timelineWidth(scroll) - scroll.clientWidth / 2,
     );
   }, [zoom]);
   function pointerDown(e: React.PointerEvent, id: string, mode: string) {
@@ -662,6 +827,7 @@ function App() {
       return;
     }
     if (!selection.includes(id)) select(id);
+    const ids = new Set(selection.includes(id) ? selection : [id]);
     drag.current = {
       id,
       mode,
@@ -670,6 +836,9 @@ function App() {
       end: c.end,
       before: current.current,
       ids: selection.includes(id) ? selection : [id],
+      origins: new Map(
+        p.captions.filter((c) => ids.has(c.id)).map((c) => [c.id, c]),
+      ),
     };
     e.currentTarget.setPointerCapture(e.pointerId);
   }
@@ -683,7 +852,7 @@ function App() {
     let start = d.start,
       end = d.end;
     if (d.mode === "move") {
-      const group = d.before.captions.filter((c) => d.ids.includes(c.id));
+      const group = [...d.origins.values()];
       const shift = Math.max(
         -Math.min(...group.map((c) => c.start)),
         Math.min(duration - Math.max(...group.map((c) => c.end)), delta),
@@ -697,9 +866,9 @@ function App() {
       (prev) => ({
         ...prev,
         captions: prev.captions.map((c) =>
-          d.mode === "move" && d.ids.includes(c.id)
+          d.mode === "move" && d.origins.has(c.id)
             ? (() => {
-                const original = d.before.captions.find((x) => x.id === c.id)!;
+                const original = d.origins.get(c.id)!;
                 return timing(
                   c,
                   original.start + start - d.start,
@@ -720,6 +889,7 @@ function App() {
     if (d) {
       if (current.current !== d.before) {
         past.current.push(d.before);
+        if (past.current.length > 100) past.current.shift();
         future.current = [];
       }
       drag.current = null;
@@ -727,12 +897,55 @@ function App() {
     }
   }
   const audioOnly = p.media?.kind === "audio";
+  const readiness = useMemo(
+    () => exportReadiness(p, exportFormat !== "text-source"),
+    [p.captions, exportFormat],
+  );
   const Player = audioOnly ? "audio" : "video";
   useEffect(() => {
     setExportFormat(audioOnly ? "text-source" : "srt");
   }, [audioOnly]);
-  const shown = sorted.filter(
-      (c) => filter === "all" || c.status !== "reviewed",
+  useEffect(() => {
+    const element = video.current;
+    if (!element || !playing) return;
+    let frame = 0,
+      animation = 0,
+      closed = false;
+    if (
+      element instanceof HTMLVideoElement &&
+      element.requestVideoFrameCallback
+    ) {
+      const tick = (_: number, metadata: VideoFrameCallbackMetadata) => {
+        if (closed) return;
+        setTime(metadata.mediaTime);
+        frame = element.requestVideoFrameCallback(tick);
+      };
+      frame = element.requestVideoFrameCallback(tick);
+    } else {
+      const tick = () => {
+        if (closed) return;
+        setTime(element.currentTime);
+        animation = requestAnimationFrame(tick);
+      };
+      animation = requestAnimationFrame(tick);
+    }
+    return () => {
+      closed = true;
+      if (frame && element instanceof HTMLVideoElement)
+        element.cancelVideoFrameCallback(frame);
+      cancelAnimationFrame(animation);
+    };
+  }, [videoUrl, playing, audioOnly]);
+  const shown = useMemo(
+      () =>
+        sorted.filter(
+          (c) =>
+            filter === "all" ||
+            c.status !== "reviewed" ||
+            c.alignment?.needsReview ||
+            c.recognition?.needsReview,
+        ),
+      [sorted, filter],
     ),
     reviewed = p.captions.filter((c) => c.status === "reviewed").length,
     currentCaption = sorted.find((c) => time >= c.start && time < c.end);
@@ -775,7 +988,7 @@ function App() {
             void attempt(async () => {
               if (exportFormat !== "srt") {
                 const result = await api.call("export", {
-                  project: p,
+                  project: operationProject(p),
                   track: exportFormat === "text-source" ? "source" : "target",
                   format: "txt",
                 });
@@ -783,11 +996,14 @@ function App() {
                 return;
               }
               const source = await api.call("export", {
-                project: p,
+                project: operationProject(p),
                 track: "source",
               });
               if (source) {
-                await api.call("export", { project: p, track: "target" });
+                await api.call("export", {
+                  project: operationProject(p),
+                  track: "target",
+                });
                 setNotice("Export finished");
               }
             })
@@ -885,7 +1101,7 @@ function App() {
               disabled={busy}
               onClick={() =>
                 void attempt(async () => {
-                  await api.call("compatible", p);
+                  await api.call("compatible", operationProject(p));
                   setError("");
                 })
               }
@@ -1182,7 +1398,10 @@ function App() {
                   }}
                   hidden={audioOnly}
                   src={videoUrl}
-                  onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
+                  onTimeUpdate={(e) => {
+                    if (e.currentTarget.paused || audioOnly)
+                      setTime(e.currentTarget.currentTime);
+                  }}
                   onPlay={() => setPlaying(true)}
                   onPause={() => setPlaying(false)}
                   onError={() =>
@@ -1329,7 +1548,7 @@ function App() {
                 onClick={() =>
                   void attempt(async () => {
                     await api.call("transcribe", {
-                      project: p,
+                      project: operationProject(p),
                       mode: transcribeMode,
                     });
                   })
@@ -1344,7 +1563,7 @@ function App() {
                     const requestId = crypto.randomUUID();
                     latestTranslation.current = requestId;
                     await api.call("translate", {
-                      project: p,
+                      project: operationProject(p),
                       requestId,
                       options: {
                         mode: translationMode,
@@ -1427,165 +1646,14 @@ function App() {
             </label>
             <span>REVIEW</span>
           </div>
-          <div
-            className="caption-scroll"
-            tabIndex={0}
-            aria-label="Caption list"
-          >
-            {shown.length ? (
-              shown.map((c, i) => (
-                <div
-                  id={c.id}
-                  key={c.id}
-                  tabIndex={0}
-                  className={
-                    "caption-row " +
-                    (selection.includes(c.id) ? "selected" : "")
-                  }
-                  onClick={(e) => {
-                    choose(c.id, e);
-                    if (
-                      !(e.target as HTMLElement).closest(
-                        "input,textarea,button",
-                      )
-                    )
-                      e.currentTarget.focus();
-                  }}
-                >
-                  <div className="cue-time">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        choose(c.id, e);
-                        seek(c.start);
-                      }}
-                    >
-                      {String(sorted.indexOf(c) + 1).padStart(2, "0")}
-                    </button>
-                    <input
-                      aria-label={"Start " + (i + 1)}
-                      type="number"
-                      step="0.01"
-                      value={Number(c.start.toFixed(3))}
-                      onChange={(e) => {
-                        try {
-                          edit(c.id, (v) =>
-                            timing(v, +e.target.value, v.end, duration),
-                          );
-                        } catch (err) {
-                          fail(err);
-                        }
-                      }}
-                    />
-                    <input
-                      aria-label={"End " + (i + 1)}
-                      type="number"
-                      step="0.01"
-                      value={Number(c.end.toFixed(3))}
-                      onChange={(e) => {
-                        try {
-                          edit(c.id, (v) =>
-                            timing(v, v.start, +e.target.value, duration),
-                          );
-                        } catch (err) {
-                          fail(err);
-                        }
-                      }}
-                    />
-                    {c.alignment && (
-                      <small
-                        className={
-                          "alignment-state " +
-                          (c.alignment.needsReview ? "check" : "aligned")
-                        }
-                        title={
-                          c.alignment.needsReview
-                            ? "Source or timing changed, or token alignment is uncertain. Check against audio."
-                            : c.alignment.method === "whisperx"
-                              ? "Timed with WhisperX forced alignment"
-                              : "Timed from Whisper DTW audio-aligned tokens"
-                        }
-                      >
-                        {c.alignment.needsReview
-                          ? "Check sync"
-                          : "Audio aligned"}
-                      </small>
-                    )}
-                  </div>
-                  <textarea
-                    aria-label={"Source caption " + (i + 1)}
-                    placeholder="Type the spoken words…"
-                    value={c.source}
-                    onChange={(e) =>
-                      edit(c.id, (v) => sourceEdit(v, e.target.value))
-                    }
-                  />
-                  <div className="target-cell">
-                    <textarea
-                      aria-label={"Translation caption " + (i + 1)}
-                      placeholder="Translation appears here…"
-                      value={c.target}
-                      onChange={(e) =>
-                        edit(c.id, (v) => ({
-                          ...v,
-                          target: e.target.value,
-                          status: "draft",
-                          error: undefined,
-                          translation: { origin: "manual", issues: [] },
-                        }))
-                      }
-                    />
-                    {c.error && <small className="failure">{c.error}</small>}
-                    {[
-                      ...(c.target.trim()
-                        ? c.translation?.issues.filter(
-                            (issue) => issue.kind !== "readability",
-                          ) || []
-                        : []),
-                      ...(c.target
-                        ? readabilityIssues(
-                            c.target,
-                            c.end - c.start,
-                            p.targetLanguage,
-                          )
-                        : []),
-                    ].map((issue, j) => (
-                      <small className="translation-issue" key={j}>
-                        {issue.kind === "meaning"
-                          ? "Check meaning"
-                          : "Readability"}
-                        : {issue.message}
-                      </small>
-                    ))}
-                  </div>
-                  <button
-                    className={"review " + c.status}
-                    title={
-                      c.status === "stale"
-                        ? "Source changed — check the translation"
-                        : c.status
-                    }
-                    disabled={!c.target}
-                    onClick={() =>
-                      edit(c.id, (v) => ({
-                        ...v,
-                        status: v.status === "reviewed" ? "draft" : "reviewed",
-                        error: undefined,
-                      }))
-                    }
-                  >
-                    {c.status === "reviewed"
-                      ? "✓"
-                      : c.status === "stale"
-                        ? "↻"
-                        : c.status === "failed"
-                          ? "!"
-                          : "○"}
-                    <small>{c.status}</small>
-                  </button>
-                </div>
-              ))
-            ) : (
+          <CaptionList
+            captions={shown}
+            selected={selected}
+            selection={selection}
+            duration={duration}
+            targetLanguage={p.targetLanguage}
+            actions={captionActions}
+            empty={
               <div className="empty-captions">
                 <span>☷</span>
                 <h3>
@@ -1598,14 +1666,34 @@ function App() {
                   ＋ Add caption
                 </button>
               </div>
-            )}
-          </div>
+            }
+          />
+
           <div className="caption-footer">
             <span>
               {reviewed} / {p.captions.length} reviewed
               {p.captions.some((c) => !c.target.trim()) &&
                 ` · ${p.captions.filter((c) => !c.target.trim()).length} untranslated`}
             </span>
+            {readiness.labels.length > 0 && (
+              <details className="export-readiness">
+                <summary title={readiness.labels.join(" · ")}>
+                  Review before export ({readiness.ids.length})
+                </summary>
+                <div role="status">
+                  <p>{readiness.labels.join(" · ")}</p>
+                  <button
+                    onClick={() => {
+                      setFilter("review");
+                      select(readiness.ids[0] || "");
+                    }}
+                  >
+                    Review issues
+                  </button>
+                  <small>Exports use current text.</small>
+                </div>
+              </details>
+            )}
             <button disabled={!p.media} onClick={add}>
               ＋ Add caption <kbd>N</kbd>
             </button>
@@ -1666,7 +1754,10 @@ function App() {
               disabled={busy || !selection.length}
               onClick={() =>
                 void attempt(async () => {
-                  await api.call("realign", { project: p, ids: selection });
+                  await api.call("realign", {
+                    project: operationProject(p),
+                    ids: selection,
+                  });
                 })
               }
             >
@@ -1677,7 +1768,7 @@ function App() {
               onClick={() =>
                 void attempt(async () => {
                   await api.call("realign", {
-                    project: p,
+                    project: operationProject(p),
                     ids: p.captions.map((c) => c.id),
                   });
                 })
@@ -1685,13 +1776,7 @@ function App() {
             >
               Re-align all
             </button>
-            <small aria-live="polite">
-              {
-                selection.filter((id) => p.captions.some((c) => c.id === id))
-                  .length
-              }{" "}
-              selected
-            </small>
+            <small aria-live="polite">{selection.length} selected</small>
           </div>
           <div className="zoom">
             <button
@@ -1728,7 +1813,23 @@ function App() {
             </output>
           </div>
         </div>
-        <div className="timeline-scroll" ref={timelineScroll}>
+        <div
+          className="timeline-scroll"
+          ref={timelineScroll}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            setVisibleTime({
+              pixels: el.clientWidth,
+              start: Math.max(
+                0,
+                (el.scrollLeft / timelineWidth(el)) * duration - 1,
+              ),
+              end:
+                ((el.scrollLeft + el.clientWidth) / timelineWidth(el)) * duration +
+                1,
+            });
+          }}
+        >
           <div
             className="timeline-inner"
             style={{ width: `${zoom * 100}%` }}
@@ -1758,7 +1859,34 @@ function App() {
               </div>
             )}
             <div className="lane source-lane">
-              {sorted.map((c) => (
+              {overview.groups.map((group) => (
+                <button
+                  key={"group-" + group.id}
+                  className={"cue-group" + (group.overlap ? " overlap" : "")}
+                  style={{
+                    left: `${(group.start / duration) * 100}%`,
+                    width: `${((group.end - group.start) / duration) * 100}%`,
+                  }}
+                  title={`${group.count} captions${group.overlap ? " · overlapping captions" : ""} · zoom in to edit`}
+                  aria-label={`${group.count} captions${group.overlap ? " · overlapping captions" : ""} · zoom in to edit`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    seek(group.start);
+                    setZoom((z) => Math.min(256, z * 4));
+                  }}
+                >
+                  {group.count}
+                  {group.overlap && (
+                    <span
+                      className="overlap-warning"
+                      aria-label="Overlapping captions"
+                    >
+                      !
+                    </span>
+                  )}
+                </button>
+              ))}
+              {overview.individual.map((c) => (
                 <div
                   role="button"
                   tabIndex={0}

@@ -12,6 +12,9 @@ export const CaptionSchema = z
     status: z.enum(["empty", "draft", "reviewed", "stale", "failed"]),
     error: z.string().optional(),
     translation: TranslationMetaSchema.optional(),
+    recognition: z
+      .object({ avgLogprob: z.number().finite(), needsReview: z.boolean() })
+      .optional(),
     alignment: z
       .object({
         method: z.enum(["whisper-dtw", "whisperx"]),
@@ -65,6 +68,25 @@ export const ProjectSchema = z
   });
 export type Caption = z.infer<typeof CaptionSchema>;
 export type Project = z.infer<typeof ProjectSchema>;
+// Immutable job evidence survives caption undo, as does derived waveform data.
+export function restoreEdit(snapshot: Project, current: Project): Project {
+  if (snapshot.id !== current.id) return snapshot;
+  const runs = new Map(
+    [...(snapshot.speechRuns || []), ...(current.speechRuns || [])].map(
+      (run) => [run.id, run],
+    ),
+  );
+  return {
+    ...snapshot,
+    speechRuns: runs.size ? [...runs.values()] : undefined,
+    waveform:
+      current.waveform &&
+      current.waveform.source.path === snapshot.media?.path &&
+      current.waveform.source.duration === snapshot.media.duration
+        ? current.waveform
+        : snapshot.waveform,
+  };
+}
 export const blank = (): Project => ({
   version: 1,
   id: crypto.randomUUID(),
@@ -78,6 +100,7 @@ export function sourceEdit(c: Caption, source: string): Caption {
   return {
     ...c,
     source,
+    recognition: source === c.source ? c.recognition : undefined,
     status: source === c.source ? c.status : c.target ? "stale" : "empty",
     error: undefined,
     alignment:
@@ -233,7 +256,7 @@ export function srt(p: Project, track: "source" | "target") {
     .filter((c) => c[track].trim())
     .map(
       (c, i) =>
-        `${i + 1}\r\n${stamp(c.start)} --> ${stamp(c.end)}\r\n${c[track].trim()}\r\n`,
+        `${i + 1}\r\n${stamp(c.start)} --> ${stamp(c.end)}\r\n${c[track].trim().replace(/\r?\n(?:[\t ]*\r?\n)+/g, "\n")}\r\n`,
     )
     .join("\r\n");
 }

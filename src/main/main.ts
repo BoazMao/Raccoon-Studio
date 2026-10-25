@@ -23,7 +23,7 @@ import { captionsFromWhisperJson, dtwPreset } from "../shared/alignment";
 import type { Settings, Requests, Event } from "../shared/ipc";
 import { Jobs, run } from "./jobs";
 import { whisperXJob, SpeechJobError } from "./whisperx";
-import { readProject, writeProject } from "./storage";
+import { readProject, writeProjectFiles } from "./storage";
 import { migrateProfile } from "./profile";
 import { toolDefaults, restoreTool, persistTool } from "./tools";
 import {
@@ -34,6 +34,8 @@ import {
   cleanupRuntime,
 } from "./install-whisperx";
 import { SpeechResource } from "./speech-resource";
+import { SpeechWorker } from "./speech-worker";
+import { FrameTimes } from "./frame-time";
 import { speechStatus } from "./speech-status";
 import { RuntimeProfileSchema } from "../shared/speech-runtime";
 import {
@@ -76,6 +78,8 @@ const emit = (event: Event) => {
 };
 const jobs = new Jobs(emit);
 const speechResource = new SpeechResource();
+const speechWorker = new SpeechWorker();
+const frameTimes = new FrameTimes();
 const data = () => app.getPath("userData");
 const settingsFile = () => path.join(data(), "settings.json");
 function registerMedia(file: string) {
@@ -181,6 +185,7 @@ async function setup() {
     whisperxModel: "medium",
     whisperxDevice: "cpu",
     whisperxManaged: Boolean(managed),
+    whisperxReuseWorker: true,
     whisperxBatchLimit: 0,
     whisperxPrecision: "float16",
     whisperxCache: path.join(data(), "models", "whisperx"),
@@ -228,6 +233,10 @@ async function setup() {
     window.close();
   });
   handle("settings", () => settings);
+  handle("stopJobs", async () => {
+    await jobs.cancelAllAndWait();
+    await speechWorker.stop();
+  });
   handle("glossaryImport", async () => {
     const selected = await dialog.showOpenDialog(window, {
       title: "Import glossary",
@@ -277,6 +286,7 @@ async function setup() {
         whisperxModel: z.string().min(1).default("medium"),
         whisperxDevice: z.enum(["auto", "cpu", "cuda"]).default("auto"),
         whisperxManaged: z.boolean().optional(),
+        whisperxReuseWorker: z.boolean().default(true),
         whisperxRuntimeRoot: z
           .string()
           .refine(
@@ -359,6 +369,14 @@ async function setup() {
     return file;
   });
   handle("url", (file) => registerMedia(trustedFile(file)));
+  handle("frameTime", (input) =>
+    frameTimes.step(
+      trustedFile(input.path),
+      z.number().finite().nonnegative().parse(input.time),
+      z.union([z.literal(-1), z.literal(1)]).parse(input.direction),
+      settings.ffprobe,
+    ),
+  );
   handle("open", async () => {
     const r = await dialog.showOpenDialog(window, {
       properties: ["openFile"],
@@ -387,7 +405,9 @@ async function setup() {
     }
   });
   handle("save", async (input) => {
-    const p = project(input.project);
+    const p = input.project;
+    z.string().uuid().parse(p.id);
+    z.string().parse(p.name);
     let file = input.autosave
       ? path.join(data(), "recovery.captionproj")
       : input.path;
@@ -402,12 +422,13 @@ async function setup() {
       file = r.filePath;
     }
     if (!file) return null;
-    if (input.autosave)
-      await writeProject(
-        path.join(data(), "recovery", p.id + ".captionproj"),
-        p,
-      );
-    await writeProject(file, p);
+    await writeProjectFiles(
+      input.autosave
+        ? [path.join(data(), "recovery", p.id + ".captionproj"), file]
+        : [file],
+      p,
+      input.autosave,
+    );
     return file;
   });
   handle("media", (input) => {
@@ -419,12 +440,19 @@ async function setup() {
       update(100, media.kind === "audio" ? "Audio ready" : "Video ready");
     });
   });
+  let latestWaveJob: string | undefined;
   handle("wave", (input) => {
     const file = trustedFile(input.path);
     z.string().uuid().parse(input.requestId);
     z.number().finite().nonnegative().parse(input.duration);
     const ffmpeg = settings.ffmpeg;
-    return jobs.start("Waveform", async (signal, update) => {
+    const previous = latestWaveJob
+      ? jobs.active.get(latestWaveJob)?.done
+      : undefined;
+    if (latestWaveJob) jobs.cancel(latestWaveJob);
+    latestWaveJob = jobs.start("Waveform", async (signal, update) => {
+      if (previous) await previous;
+      signal.throwIfAborted();
       const source = await waveformSource(file, input.duration);
       signal.throwIfAborted();
       const cached = await restoreWaveform(input.cached, source);
@@ -513,6 +541,7 @@ async function setup() {
         reused: false,
       });
     });
+    return latestWaveJob;
   });
   handle("preview", async (raw) => {
     const url = validUrl(raw);
@@ -617,12 +646,40 @@ async function setup() {
       throw error;
     }
   }
+  function retainCancelled(
+    projectId: string,
+    signal: AbortSignal,
+    speechRun: import("../shared/model").SpeechRun | undefined,
+  ) {
+    if (!signal.aborted) return;
+    if (speechRun)
+      emit({
+        type: "speechFailed",
+        projectId,
+        speechRun: {
+          ...speechRun,
+          captions: [],
+          importError: "Cancelled",
+          raw: { ...speechRun.raw, cancelled: true },
+        },
+      });
+    signal.throwIfAborted();
+  }
   handle("speechRuntime", () => speechStatus(rootFor(settings)));
+  handle("releaseSpeech", () =>
+    jobs.start("WhisperX memory", (signal, update) =>
+      speechResource.use(signal, async () => {
+        await speechWorker.stop();
+        update(100, "Speech interpreter released");
+      }),
+    ),
+  );
   handle("cleanupSpeech", () => {
     const selectedRoot = rootFor(settings);
     return jobs.start("WhisperX cleanup", (signal, update) =>
       speechResource.use(signal, async () => {
         update(10, "Removing previous verified managed installations");
+        await speechWorker.stop();
         await cleanupRuntime(selectedRoot);
       }),
     );
@@ -638,6 +695,7 @@ async function setup() {
         update(0, "Waiting for speech jobs to finish before installation");
         const release = await speechResource.acquire(signal);
         try {
+          await speechWorker.stop();
           const python = await installWhisperX(selectedRoot, signal, update, {
             beginCommit,
             profile,
@@ -677,6 +735,8 @@ async function setup() {
             workerPath,
             signal,
             update,
+            undefined,
+            speechWorker.run,
           );
         } finally {
           await rm(dir, { recursive: true, force: true });
@@ -706,10 +766,12 @@ async function setup() {
             signal,
             update,
             originals,
+            speechWorker.run,
           );
-          signal.throwIfAborted();
+          retainCancelled(p.id, signal, speechRun);
           emit({
             type: "aligned",
+            mediaPath: p.media!.path,
             speechRun,
             projectId: p.id,
             language: p.language,
@@ -742,8 +804,10 @@ async function setup() {
               workerPath,
               signal,
               update,
+              undefined,
+              speechWorker.run,
             );
-            signal.throwIfAborted();
+            retainCancelled(p.id, signal, speechRun);
             // Only a completed real model run qualifies the managed installation
             // for removal of previous versions. CUDA installs must actually use CUDA.
             const runtime = await managedRuntime(rootFor(config));
@@ -760,8 +824,10 @@ async function setup() {
                 rootFor(config),
                 resolved.whisperxPython,
               );
+            retainCancelled(p.id, signal, speechRun);
             emit({
               type: "captions",
+              mediaPath: p.media!.path,
               projectId: p.id,
               captions,
               mode,
@@ -839,6 +905,7 @@ async function setup() {
           signal.throwIfAborted();
           emit({
             type: "captions",
+            mediaPath: p.media!.path,
             projectId: p.id,
             captions,
             mode,
@@ -1046,5 +1113,6 @@ app.whenReady().then(async () => {
 });
 app.on("window-all-closed", async () => {
   await jobs.cancelAllAndWait();
+  await speechWorker.stop();
   app.quit();
 });

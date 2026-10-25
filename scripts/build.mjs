@@ -1,6 +1,14 @@
 import { build } from "esbuild";
 import { mkdir, copyFile, cp } from "node:fs/promises";
+const development = process.argv.includes("--development");
 await mkdir("dist", { recursive: true });
+await build({
+  entryPoints: ["src/main/project-worker.ts"],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  outfile: "dist/project-worker.cjs",
+});
 await build({
   entryPoints: ["src/main/main.ts"],
   bundle: true,
@@ -21,6 +29,12 @@ await build({
   entryPoints: ["src/renderer/index.tsx"],
   bundle: true,
   platform: "browser",
+  define: {
+    "process.env.NODE_ENV": JSON.stringify(
+      development ? "development" : "production",
+    ),
+  },
+  minify: !development,
   outfile: "dist/renderer.js",
 });
 await copyFile("src/renderer/index.html", "dist/index.html");
