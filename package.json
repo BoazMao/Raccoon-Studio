@@ -1,6 +1,6 @@
 {
   "name": "raccoon-studio",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Raccoon Studio — local-first Windows subtitle editor",
   "repository": {

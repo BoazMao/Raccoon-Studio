@@ -18,7 +18,7 @@ Node.js is only needed for development.
 
 - **WhisperX:** Open **Settings → Install WhisperX** for CPU, or **Install GPU support** for NVIDIA CUDA. The app installs private Python and locked dependencies. Allow **6 GiB free for CPU or 12 GiB for GPU** during installation, plus model space. GPU support needs a compatible NVIDIA driver; a separate Python installation or full CUDA toolkit is unnecessary. Choose **Auto**, **CPU**, or **NVIDIA GPU**, then run **Check WhisperX setup**.
 - **Models:** Recognition and alignment models download on first use. The default recognition model is `medium`. After downloading, enable **Use cached models only** for offline transcription.
-  The tested managed installations occupy approximately **1.2 GiB (CPU)** or **5.1 GiB (CUDA)** before models. Advanced Settings lets you choose another drive. These GPU and audio features currently require the local source/unpackaged build; they are not in the published v0.1.3 release.
+  The tested managed installations occupy approximately **1.2 GiB (CPU)** or **5.1 GiB (CUDA)** before models. Advanced Settings lets you choose another drive.
 - **whisper.cpp fallback:** Select it in Settings and choose a compatible GGML model. Models are not bundled.
 - **Translation:** In Settings, enter an OpenAI-compatible endpoint, model ID, and API key if required. Translation sends caption text to that endpoint; transcription and alignment stay local.
 

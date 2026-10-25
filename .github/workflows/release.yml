@@ -2,7 +2,7 @@ name: Windows release
 
 on:
   push:
-    branches: [codex/release-v0.1.3]
+    branches: [codex/release-v0.1.4]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -43,6 +43,8 @@ jobs:
           npm run build
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run test:e2e
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run test:performance
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build unpackaged Windows app
         run: |
@@ -115,7 +117,7 @@ jobs:
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $asset = "Raccoon-Studio-$version-win-x64.zip"
-          Copy-Item -LiteralPath README.md,WHISPERX_SETUP.md,LICENSE -Destination release/win-unpacked
+          Copy-Item -LiteralPath README.md,WHISPERX_SETUP.md,PERFORMANCE_AND_QUALITY.md,LICENSE -Destination release/win-unpacked
           New-Item -ItemType Directory -Path release/win-unpacked/scripts -Force | Out-Null
           Copy-Item -LiteralPath scripts/setup-whisperx.ps1,scripts/requirements-whisperx.txt -Destination release/win-unpacked/scripts
           Copy-Item -LiteralPath scripts/speech-runtime -Destination release/win-unpacked/scripts -Recurse
@@ -131,24 +133,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           @'
-          - Translation now uses surrounding captions, your terminology, and optional meaning checks.
-          - Save glossaries globally or export and import them between projects.
-          - Choose video quality before downloading.
-          - Video preview shows translated subtitles when available.
-          - Completed translation drafts are kept if a meaning check fails.
-          - Fixed glossary terms carrying over between languages and outdated warnings after splitting or merging captions.
+          - Transcribe audio files and export timestamped text.
+          - Install NVIDIA GPU support from Settings for faster transcription.
+          - Faster editing and saving in large projects.
+          - Faster repeated transcription and alignment.
+          - Translation retries keep completed drafts and avoid repeated work.
+          - More reliable frame stepping, undo, cancellation, and subtitle review.
           '@ | Set-Content -LiteralPath .tools/release-notes.md -Encoding utf8
           $tag = "v$env:RELEASE_VERSION"
           gh release view $tag --repo "${{ github.repository }}" *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh api --method PATCH "repos/${{ github.repository }}/git/refs/tags/$tag" -f "sha=$env:RELEASE_COMMIT" -F force=true
-            if ($LASTEXITCODE) { exit $LASTEXITCODE }
-            gh release upload $tag "release/$env:RELEASE_ASSET" release/SHA256SUMS.txt --clobber --repo "${{ github.repository }}"
-            if ($LASTEXITCODE) { exit $LASTEXITCODE }
-            gh release edit $tag --repo "${{ github.repository }}" --title "Raccoon Studio $env:RELEASE_VERSION" --notes-file .tools/release-notes.md
-          } else {
-            gh release create "v$env:RELEASE_VERSION" "release/$env:RELEASE_ASSET" release/SHA256SUMS.txt --repo "${{ github.repository }}" --target $env:RELEASE_COMMIT --title "Raccoon Studio $env:RELEASE_VERSION" --notes-file .tools/release-notes.md
+            throw "Release $tag already exists. Use a new version instead of overwriting it."
           }
+          gh release create $tag "release/$env:RELEASE_ASSET" release/SHA256SUMS.txt --repo "${{ github.repository }}" --target $env:RELEASE_COMMIT --title "Raccoon Studio $env:RELEASE_VERSION" --notes-file .tools/release-notes.md
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Preserve verification screenshots
         if: always()

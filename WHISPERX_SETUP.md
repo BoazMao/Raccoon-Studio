@@ -4,13 +4,13 @@ WhisperX is the default speech engine. The existing whisper.cpp engine remains s
 
 ## One-click Windows CPU or NVIDIA setup
 
-In the local source/unpackaged build, open **Settings → Install WhisperX** for CPU, or **Install GPU support** for NVIDIA CUDA. This downloads a checksum-verified uv installer, private Python 3.12.14, and fully hash-locked dependencies: WhisperX 3.8.6, PyTorch/torchaudio 2.8.0, torchvision 0.23.0, Transformers 4.57.6, CTranslate2 4.8.2 and faster-whisper 1.2.1. The GPU profile includes CUDA 12.8 and cuDNN libraries and also supports CPU operation. It does not change system Python, PATH or registry configuration. No system Python or full CUDA toolkit is needed.
+Open **Settings → Install WhisperX** for CPU, or **Install GPU support** for NVIDIA CUDA. This downloads a checksum-verified uv installer, private Python 3.12.14, and fully hash-locked dependencies: WhisperX 3.8.6, PyTorch/torchaudio 2.8.0, torchvision 0.23.0, Transformers 4.57.6, CTranslate2 4.8.2 and faster-whisper 1.2.1. The GPU profile includes CUDA 12.8 and cuDNN libraries and also supports CPU operation. It does not change system Python, PATH or registry configuration. No system Python or full CUDA toolkit is needed.
 
 Progress and cancellation appear in the task panel. Once verification succeeds, the brief final activation phase disables Cancel so a completed activation cannot be reported as cancelled. Closing the app waits for activation or cancelled-job cleanup before exiting. Repeated clicks do not start a second simultaneous installation. Failed/cancelled installations remove their incomplete environment and retain the previous active runtime. Reinstall creates and verifies a new environment before selecting it; previous successful environments remain available on disk.
 
 Internet access and at least **6 GiB free for CPU or 12 GiB for GPU** are required during installation, plus model space. Downloads are approximately 0.8 GiB for CPU or 3.5 GiB for GPU. Link-time PyTorch build libraries are removed only from managed, version-checked installations; inference DLLs remain. The default location is the app's user-data folder under `runtime/whisperx`. **Advanced performance settings → Choose runtime folder** lets you select another drive before installing. Changing the folder does not move an existing installation. Models use the separate cache configured in Settings and download on first use. No administrator access or API key is required.
 
-These GPU changes are available from source and have not been released. Published builds may offer only the earlier CPU installer.
+CPU and GPU installation are available in Raccoon Studio 0.1.4 and later.
 
 ## Manual or GPU environment
 
@@ -38,7 +38,7 @@ NVIDIA acceleration requires a CUDA-12.8-compatible NVIDIA driver and sufficient
 
 **Auto** selects CUDA when available. Recognition uses FP16 by default and a conservative batch based on available VRAM. Memory failures reduce the batch first; Auto can retry on CPU without changing the selected model. Explicit **NVIDIA GPU** reports failures instead of switching to CPU. INT8/FP16 is optional because outputs may differ. Recognition checkpoints and incremental alignment checkpoints let retries reuse completed work. Completed and failed/cancelled partial outputs are retained in project speech archives. Progress records device, precision, batch and fallback reasons.
 
-Speech jobs and runtime maintenance share a cancellable queue; editing and unrelated tasks remain responsive. Each job runs a fresh worker, releasing GPU memory on completion or cancellation. Installation verifies module imports and real CUDA operations; first successful model inference marks the runtime verified. **Remove previous speech runtimes** then removes only obsolete managed environments, preserving the active runtime, custom environments and model cache.
+Speech jobs and runtime maintenance share a cancellable queue; editing and unrelated tasks remain responsive. One interpreter stays warm for up to 90 seconds idle, with models released after each request. Cancellation or failure terminates it. **Advanced performance settings** can disable reuse or release speech memory immediately. Installation verifies module imports and real CUDA operations; first successful model inference marks the runtime verified. **Remove previous speech runtimes** then removes only obsolete managed environments, preserving the active runtime, custom environments and model cache.
 
 ## Editing workflow
 
